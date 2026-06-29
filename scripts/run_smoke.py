@@ -135,7 +135,12 @@ def main() -> int:
     run_dir = ROOT / args.results_dir / timestamp
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    server = start_server(args.bind)
+    try:
+        server = start_server(args.bind)
+    except RuntimeError as error:
+        print(f"smoke unavailable: {error}", file=sys.stderr)
+        return 2
+
     try:
         wait_for_health(f"http://{args.bind}/health")
         failures = run_clients(config, run_dir)
