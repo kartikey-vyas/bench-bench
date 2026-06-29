@@ -1,0 +1,27 @@
+[package]
+name = "server-rust"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "server_rust"
+path = "src/lib.rs"
+
+[[bin]]
+name = "synthetic-openai-server"
+path = "src/main.rs"
+
+[dependencies]
+async-stream = "0.3"
+axum = "0.7"
+bytes = "1"
+clap = { version = "4", features = ["derive"] }
+futures-core = "0.3"
+http = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "time"] }
+tokio-stream = "0.1"
+
+[dev-dependencies]
+tower = "0.5"
