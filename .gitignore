@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+
+results/
+
+server-rust/target/
+rust-client/target/
+go-client/bench-go-client
+go-client/go-client
