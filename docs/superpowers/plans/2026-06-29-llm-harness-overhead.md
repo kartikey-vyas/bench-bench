@@ -52,52 +52,64 @@
 - [ ] **Step 1: Write failing Python SSE tests**
 
 ```python
+import unittest
+
 from bench_harness.sse import SseDecoder
 
 
-def test_decoder_returns_complete_data_events_and_buffers_partial_lines():
-    decoder = SseDecoder()
+class SseDecoderTests(unittest.TestCase):
+    def test_decoder_returns_complete_data_events_and_buffers_partial_lines(self):
+        decoder = SseDecoder()
 
-    assert decoder.feed("data: {\"a\":") == []
-    assert decoder.feed("1}\n\ndata: [DONE]\n\n") == ['{"a":1}', "[DONE]"]
+        self.assertEqual(decoder.feed("data: {\"a\":"), [])
+        self.assertEqual(decoder.feed("1}\n\ndata: [DONE]\n\n"), ['{"a":1}', "[DONE]"])
+
+    def test_decoder_ignores_comments_and_blank_events(self):
+        decoder = SseDecoder()
+
+        self.assertEqual(decoder.feed(": keepalive\n\ndata: hello\n\n\n"), ["hello"])
 
 
-def test_decoder_ignores_comments_and_blank_events():
-    decoder = SseDecoder()
-
-    assert decoder.feed(": keepalive\n\ndata: hello\n\n\n") == ["hello"]
+if __name__ == "__main__":
+    unittest.main()
 ```
 
 - [ ] **Step 2: Write failing Python metric tests**
 
 ```python
+import unittest
+
 from bench_harness.metrics import RequestMeasurement, aggregate_summary, percentile
 
 
-def test_percentile_uses_nearest_rank():
-    assert percentile([10.0, 20.0, 30.0, 40.0], 0.50) == 20.0
-    assert percentile([10.0, 20.0, 30.0, 40.0], 0.95) == 40.0
+class MetricsTests(unittest.TestCase):
+    def test_percentile_uses_nearest_rank(self):
+        self.assertEqual(percentile([10.0, 20.0, 30.0, 40.0], 0.50), 20.0)
+        self.assertEqual(percentile([10.0, 20.0, 30.0, 40.0], 0.95), 40.0)
+
+    def test_aggregate_summary_computes_rates_and_latency_percentiles(self):
+        measurements = [
+            RequestMeasurement(ok=True, latency_ms=10.0, first_chunk_ms=2.0, chunks=4, bytes=16),
+            RequestMeasurement(ok=True, latency_ms=30.0, first_chunk_ms=4.0, chunks=4, bytes=16),
+            RequestMeasurement(ok=False, latency_ms=50.0, first_chunk_ms=0.0, chunks=0, bytes=0),
+        ]
+
+        summary = aggregate_summary(measurements, duration_ms=20.0)
+
+        self.assertEqual(summary["successful_requests"], 2)
+        self.assertEqual(summary["failed_requests"], 1)
+        self.assertEqual(summary["total_chunks"], 8)
+        self.assertEqual(summary["total_bytes"], 32)
+        self.assertEqual(summary["requests_per_second"], 100.0)
+        self.assertEqual(summary["chunks_per_second"], 400.0)
+        self.assertEqual(summary["mean_request_latency_ms"], 20.0)
+        self.assertEqual(summary["p50_request_latency_ms"], 10.0)
+        self.assertEqual(summary["p95_request_latency_ms"], 30.0)
+        self.assertEqual(summary["mean_time_to_first_chunk_ms"], 3.0)
 
 
-def test_aggregate_summary_computes_rates_and_latency_percentiles():
-    measurements = [
-        RequestMeasurement(ok=True, latency_ms=10.0, first_chunk_ms=2.0, chunks=4, bytes=16),
-        RequestMeasurement(ok=True, latency_ms=30.0, first_chunk_ms=4.0, chunks=4, bytes=16),
-        RequestMeasurement(ok=False, latency_ms=50.0, first_chunk_ms=0.0, chunks=0, bytes=0),
-    ]
-
-    summary = aggregate_summary(measurements, duration_ms=20.0)
-
-    assert summary["successful_requests"] == 2
-    assert summary["failed_requests"] == 1
-    assert summary["total_chunks"] == 8
-    assert summary["total_bytes"] == 32
-    assert summary["requests_per_second"] == 100.0
-    assert summary["chunks_per_second"] == 400.0
-    assert summary["mean_request_latency_ms"] == 20.0
-    assert summary["p50_request_latency_ms"] == 10.0
-    assert summary["p95_request_latency_ms"] == 30.0
-    assert summary["mean_time_to_first_chunk_ms"] == 3.0
+if __name__ == "__main__":
+    unittest.main()
 ```
 
 - [ ] **Step 3: Verify Python tests fail before implementation**
@@ -182,23 +194,33 @@ Expected: PASS when Rust toolchain is installed.
 - [ ] **Step 1: Write config loader test first**
 
 ```python
+import unittest
 from pathlib import Path
+
 from bench_harness.config import WorkloadConfig
 
 
-def test_workload_config_loads_json(tmp_path: Path):
-    config_path = tmp_path / "workload.json"
-    config_path.write_text(
-        '{"base_url":"http://127.0.0.1:8080","total_requests":3,'
-        '"concurrency":2,"chunks_per_response":4,"chunk_bytes":8,'
-        '"delay_us":0,"warmup_requests":1,"output_dir":"results"}'
-    )
+class WorkloadConfigTests(unittest.TestCase):
+    def test_workload_config_loads_json(self):
+        import tempfile
 
-    config = WorkloadConfig.from_path(config_path)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "workload.json"
+            config_path.write_text(
+                '{"base_url":"http://127.0.0.1:8080","total_requests":3,'
+                '"concurrency":2,"chunks_per_response":4,"chunk_bytes":8,'
+                '"delay_us":0,"warmup_requests":1,"output_dir":"results"}'
+            )
 
-    assert config.total_requests == 3
-    assert config.request_payload(7)["chunks"] == 4
-    assert config.request_payload(7)["request_id"] == "python-7"
+            config = WorkloadConfig.from_path(config_path)
+
+        self.assertEqual(config.total_requests, 3)
+        self.assertEqual(config.request_payload(7)["chunks"], 4)
+        self.assertEqual(config.request_payload(7)["request_id"], "python-7")
+
+
+if __name__ == "__main__":
+    unittest.main()
 ```
 
 - [ ] **Step 2: Verify config test fails before implementation**
