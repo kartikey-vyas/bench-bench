@@ -1,4 +1,4 @@
-use rust_client::{percentile, SseDecoder};
+use rust_client::{percentile, ClientKind, SseDecoder};
 
 #[test]
 fn decoder_buffers_partial_events() {
@@ -25,4 +25,17 @@ fn decoder_ignores_comments() {
 fn percentile_uses_nearest_rank() {
     assert_eq!(percentile(&[10.0, 20.0, 30.0, 40.0], 0.50), 20.0);
     assert_eq!(percentile(&[10.0, 20.0, 30.0, 40.0], 0.95), 40.0);
+}
+
+#[test]
+fn client_kind_parses_and_labels_implementations() {
+    assert_eq!(
+        ClientKind::parse("reqwest").unwrap().implementation(),
+        "reqwest-tokio"
+    );
+    assert_eq!(
+        ClientKind::parse("hyper").unwrap().implementation(),
+        "hyper-tokio"
+    );
+    assert!(ClientKind::parse("curl").is_err());
 }

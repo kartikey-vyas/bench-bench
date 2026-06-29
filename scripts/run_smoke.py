@@ -103,20 +103,23 @@ def run_clients(config: Path, run_dir: Path) -> int:
         print("skip go client: go is not installed")
 
     if require_tool("cargo"):
-        failures += run_command(
-            [
-                "cargo",
-                "run",
-                "--manifest-path",
-                str(ROOT / "rust-client" / "Cargo.toml"),
-                "--release",
-                "--",
-                "--config",
-                str(config),
-                "--output-dir",
-                str(run_dir / "rust"),
-            ]
-        )
+        for client_name in ("reqwest", "hyper"):
+            failures += run_command(
+                [
+                    "cargo",
+                    "run",
+                    "--manifest-path",
+                    str(ROOT / "rust-client" / "Cargo.toml"),
+                    "--release",
+                    "--",
+                    "--config",
+                    str(config),
+                    "--output-dir",
+                    str(run_dir / f"rust-{client_name}"),
+                    "--client",
+                    client_name,
+                ]
+            )
     else:
         print("skip rust client: cargo is not installed")
 

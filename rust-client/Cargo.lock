@@ -814,9 +814,13 @@ dependencies = [
 name = "rust-client"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "chrono",
  "clap",
  "futures-util",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "reqwest",
  "serde",
  "serde_json",

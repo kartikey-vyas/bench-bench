@@ -6,8 +6,15 @@ use std::{
     time::Instant,
 };
 
+use bytes::Bytes;
 use chrono::Utc;
 use futures_util::{stream, StreamExt};
+use http_body_util::{BodyExt, Full};
+use hyper::{body::Incoming, header, Request};
+use hyper_util::{
+    client::legacy::{connect::HttpConnector, Client as HyperClient},
+    rt::TokioExecutor,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -146,6 +153,38 @@ pub struct ResultEnvelope {
     pub summary: Summary,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientKind {
+    Reqwest,
+    Hyper,
+}
+
+impl ClientKind {
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "reqwest" => Ok(Self::Reqwest),
+            "hyper" => Ok(Self::Hyper),
+            other => Err(format!(
+                "unsupported Rust client {other:?}; expected reqwest or hyper"
+            )),
+        }
+    }
+
+    pub fn implementation(self) -> &'static str {
+        match self {
+            Self::Reqwest => "reqwest-tokio",
+            Self::Hyper => "hyper-tokio",
+        }
+    }
+
+    pub fn output_name(self) -> &'static str {
+        match self {
+            Self::Reqwest => "rust-reqwest",
+            Self::Hyper => "rust-hyper",
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct ChunkPayload {
     choices: Vec<Choice>,
@@ -162,7 +201,13 @@ struct Delta {
     content: String,
 }
 
-pub async fn run_one_request(client: &reqwest::Client, config: &Config, request_index: usize) -> Measurement {
+type HyperHttpClient = HyperClient<HttpConnector, Full<Bytes>>;
+
+pub async fn run_one_reqwest_request(
+    client: &reqwest::Client,
+    config: &Config,
+    request_index: usize,
+) -> Measurement {
     let started = Instant::now();
     let response = match client
         .post(config.endpoint())
@@ -209,7 +254,9 @@ pub async fn run_one_request(client: &reqwest::Client, config: &Config, request_
 
             let payload: ChunkPayload = match serde_json::from_str(&event) {
                 Ok(payload) => payload,
-                Err(_) => return failed_measurement(started, first_chunk_ms, chunks, content_bytes),
+                Err(_) => {
+                    return failed_measurement(started, first_chunk_ms, chunks, content_bytes)
+                }
             };
             let Some(choice) = payload.choices.first() else {
                 return failed_measurement(started, first_chunk_ms, chunks, content_bytes);
@@ -228,7 +275,92 @@ pub async fn run_one_request(client: &reqwest::Client, config: &Config, request_
     }
 }
 
-pub async fn run_many(
+pub async fn run_one_hyper_request(
+    client: &HyperHttpClient,
+    config: &Config,
+    request_index: usize,
+) -> Measurement {
+    let started = Instant::now();
+    let body = match serde_json::to_vec(&config.request_payload(request_index, "rust-hyper")) {
+        Ok(body) => body,
+        Err(_) => return failed_measurement(started, 0.0, 0, 0),
+    };
+
+    let request = match Request::post(config.endpoint())
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Full::new(Bytes::from(body)))
+    {
+        Ok(request) => request,
+        Err(_) => return failed_measurement(started, 0.0, 0, 0),
+    };
+
+    let response = match client.request(request).await {
+        Ok(response) => response,
+        Err(_) => return failed_measurement(started, 0.0, 0, 0),
+    };
+
+    if !response.status().is_success() {
+        return failed_measurement(started, 0.0, 0, 0);
+    }
+
+    drain_hyper_body(started, response.into_body()).await
+}
+
+async fn drain_hyper_body(started: Instant, mut body: Incoming) -> Measurement {
+    let mut decoder = SseDecoder::new();
+    let mut first_chunk_ms = 0.0;
+    let mut chunks = 0;
+    let mut content_bytes = 0;
+    let mut saw_done = false;
+
+    while let Some(next) = body.frame().await {
+        let frame = match next {
+            Ok(frame) => frame,
+            Err(_) => return failed_measurement(started, first_chunk_ms, chunks, content_bytes),
+        };
+        let Some(data) = frame.data_ref() else {
+            continue;
+        };
+
+        let text = match std::str::from_utf8(data) {
+            Ok(text) => text,
+            Err(_) => return failed_measurement(started, first_chunk_ms, chunks, content_bytes),
+        };
+
+        for event in decoder.feed(text) {
+            if event == "[DONE]" {
+                saw_done = true;
+                continue;
+            }
+
+            if chunks == 0 {
+                first_chunk_ms = started.elapsed().as_secs_f64() * 1000.0;
+            }
+
+            let payload: ChunkPayload = match serde_json::from_str(&event) {
+                Ok(payload) => payload,
+                Err(_) => {
+                    return failed_measurement(started, first_chunk_ms, chunks, content_bytes)
+                }
+            };
+            let Some(choice) = payload.choices.first() else {
+                return failed_measurement(started, first_chunk_ms, chunks, content_bytes);
+            };
+            chunks += 1;
+            content_bytes += choice.delta.content.as_bytes().len();
+        }
+    }
+
+    Measurement {
+        ok: saw_done,
+        latency_ms: started.elapsed().as_secs_f64() * 1000.0,
+        first_chunk_ms,
+        chunks,
+        bytes: content_bytes,
+    }
+}
+
+pub async fn run_reqwest_many(
     client: reqwest::Client,
     config: Config,
     total_requests: usize,
@@ -238,7 +370,24 @@ pub async fn run_many(
         .map(|request_index| {
             let client = client.clone();
             let config = config.clone();
-            async move { run_one_request(&client, &config, request_index).await }
+            async move { run_one_reqwest_request(&client, &config, request_index).await }
+        })
+        .buffer_unordered(concurrency)
+        .collect()
+        .await
+}
+
+pub async fn run_hyper_many(
+    client: HyperHttpClient,
+    config: Config,
+    total_requests: usize,
+) -> Vec<Measurement> {
+    let concurrency = cmp::max(1, config.concurrency);
+    stream::iter(0..total_requests)
+        .map(|request_index| {
+            let client = client.clone();
+            let config = config.clone();
+            async move { run_one_hyper_request(&client, &config, request_index).await }
         })
         .buffer_unordered(concurrency)
         .collect()
@@ -249,31 +398,56 @@ pub async fn run_benchmark(
     config: Config,
     output_dir: Option<PathBuf>,
 ) -> Result<ResultEnvelope, Box<dyn Error + Send + Sync>> {
-    let client = reqwest::Client::builder().build()?;
+    run_benchmark_with_client(config, output_dir, ClientKind::Reqwest).await
+}
+
+pub async fn run_benchmark_with_client(
+    config: Config,
+    output_dir: Option<PathBuf>,
+    client_kind: ClientKind,
+) -> Result<ResultEnvelope, Box<dyn Error + Send + Sync>> {
     let started_at = Utc::now().to_rfc3339();
 
     if config.warmup_requests > 0 {
-        let _ = run_many(client.clone(), config.clone(), config.warmup_requests).await;
+        let _ = run_measurements(config.clone(), config.warmup_requests, client_kind).await?;
     }
 
     let measured_start = Instant::now();
-    let measurements = run_many(client, config.clone(), config.total_requests).await;
+    let measurements = run_measurements(config.clone(), config.total_requests, client_kind).await?;
     let duration_ms = measured_start.elapsed().as_secs_f64() * 1000.0;
 
     let result = ResultEnvelope {
         language: "rust".to_string(),
-        implementation: "reqwest-tokio".to_string(),
+        implementation: client_kind.implementation().to_string(),
         started_at,
         config: config.clone(),
         summary: aggregate_summary(&measurements, duration_ms),
     };
 
-    let destination = output_dir.unwrap_or_else(|| PathBuf::from(&config.output_dir).join("rust"));
+    let destination = output_dir
+        .unwrap_or_else(|| PathBuf::from(&config.output_dir).join(client_kind.output_name()));
     tokio::fs::create_dir_all(&destination).await?;
     let content = serde_json::to_string_pretty(&result)? + "\n";
     tokio::fs::write(destination.join("summary.json"), content).await?;
 
     Ok(result)
+}
+
+async fn run_measurements(
+    config: Config,
+    total_requests: usize,
+    client_kind: ClientKind,
+) -> Result<Vec<Measurement>, Box<dyn Error + Send + Sync>> {
+    match client_kind {
+        ClientKind::Reqwest => {
+            let client = reqwest::Client::builder().build()?;
+            Ok(run_reqwest_many(client, config, total_requests).await)
+        }
+        ClientKind::Hyper => {
+            let client = HyperClient::builder(TokioExecutor::new()).build_http();
+            Ok(run_hyper_many(client, config, total_requests).await)
+        }
+    }
 }
 
 pub fn aggregate_summary(measurements: &[Measurement], duration_ms: f64) -> Summary {

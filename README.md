@@ -7,7 +7,7 @@ This repo is a local benchmark demo for comparing Python, Go, and Rust harness o
 - `server-rust/`: Rust Axum synthetic OpenAI-style streaming server.
 - `bench_harness/`: Python config, SSE parser, metrics, and async `httpx` client.
 - `go-client/`: Go benchmark client using the standard `net/http` stack.
-- `rust-client/`: Rust benchmark client using Tokio and `reqwest`.
+- `rust-client/`: Rust benchmark client using Tokio with selectable `reqwest` and lower-level Hyper paths.
 - `config/`: shared workload JSON files.
 - `scripts/`: smoke runner and result comparison table.
 
@@ -57,7 +57,8 @@ Run clients manually:
 ```bash
 python3 -m bench_harness.python_client --config config/workload.smoke.json --output-dir results/manual/python
 cd go-client && go run . --config ../config/workload.smoke.json --output-dir ../results/manual/go
-cargo run --manifest-path rust-client/Cargo.toml --release -- --config config/workload.smoke.json --output-dir results/manual/rust
+cargo run --manifest-path rust-client/Cargo.toml --release -- --config config/workload.smoke.json --output-dir results/manual/rust-reqwest --client reqwest
+cargo run --manifest-path rust-client/Cargo.toml --release -- --config config/workload.smoke.json --output-dir results/manual/rust-hyper --client hyper
 ```
 
 Compare existing results:
