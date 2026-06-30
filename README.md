@@ -67,6 +67,22 @@ Compare existing results:
 python3 scripts/compare_results.py results
 ```
 
+Generate a static HTML report from the newest run:
+
+```bash
+uv run python scripts/generate_report.py
+open reports/latest/index.html
+```
+
+Generate a report from a specific run:
+
+```bash
+uv run python scripts/generate_report.py results/20260629T141233Z --output reports/latest/index.html
+open reports/latest/index.html
+```
+
+The report includes throughput charts, latency charts, per-chunk overhead, speedups, scaling explanations for each client implementation, and benchmark caveats. Generated reports are ignored by git by default.
+
 ## Workloads
 
 - `config/workload.smoke.json`: tiny correctness-oriented workload.

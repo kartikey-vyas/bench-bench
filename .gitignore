@@ -1,8 +1,10 @@
 .venv/
 __pycache__/
 *.pyc
+.superpowers/
 
 results/
+reports/
 
 server-rust/target/
 rust-client/target/

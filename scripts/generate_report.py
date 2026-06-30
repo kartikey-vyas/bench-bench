@@ -1,0 +1,448 @@
+from __future__ import annotations
+
+import argparse
+import html
+import json
+import re
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+RUN_DIR_RE = re.compile(r"^\d{8}T\d{6}Z$")
+
+IMPLEMENTATION_ORDER = {
+    ("python", "asyncio-httpx"): 0,
+    ("go", "net-http-goroutines"): 1,
+    ("rust", "reqwest-tokio"): 2,
+    ("rust", "hyper-tokio"): 3,
+}
+
+IMPLEMENTATION_COLORS = {
+    "Python asyncio-httpx": "#4b5563",
+    "Go net-http-goroutines": "#0f766e",
+    "Rust reqwest-tokio": "#b45309",
+    "Rust hyper-tokio": "#2563eb",
+}
+
+
+def find_latest_results_dir(root: Path) -> Path:
+    candidates = [path for path in root.iterdir() if path.is_dir() and RUN_DIR_RE.match(path.name)]
+    if not candidates:
+        raise FileNotFoundError(f"No timestamped result directories found under {root}")
+    return sorted(candidates, key=lambda path: path.name)[-1]
+
+
+def load_summaries(results_dir: Path) -> list[dict[str, Any]]:
+    summaries: list[dict[str, Any]] = []
+    for path in sorted(results_dir.glob("**/summary.json")):
+        data = json.loads(path.read_text())
+        data["_path"] = str(path)
+        summaries.append(data)
+    summaries.sort(key=implementation_key)
+    return summaries
+
+
+def implementation_key(item: dict[str, Any]) -> tuple[int, str]:
+    language = item.get("language", "")
+    implementation = item.get("implementation", "")
+    return (IMPLEMENTATION_ORDER.get((language, implementation), 100), f"{language}:{implementation}")
+
+
+def implementation_label(item: dict[str, Any]) -> str:
+    language = str(item.get("language", "")).title()
+    implementation = item.get("implementation", "")
+    return f"{language} {implementation}".strip()
+
+
+def compute_rows(summaries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    ordered = sorted(summaries, key=implementation_key)
+    python_rps = first_metric(ordered, "python", "requests_per_second")
+    rust_reqwest_rps = first_metric_by_implementation(ordered, "reqwest-tokio", "requests_per_second")
+    rows: list[dict[str, Any]] = []
+
+    for item in ordered:
+        summary = item["summary"]
+        requests_per_second = float(summary.get("requests_per_second", 0.0))
+        row = {
+            "label": implementation_label(item),
+            "language": item.get("language", ""),
+            "implementation": item.get("implementation", ""),
+            "summary": summary,
+            "config": item.get("config", {}),
+            "path": item.get("_path", ""),
+            "speedup_vs_python": ratio(requests_per_second, python_rps),
+            "speedup_vs_rust_reqwest": ratio(requests_per_second, rust_reqwest_rps),
+        }
+        rows.append(row)
+
+    return rows
+
+
+def render_report(results_dir: Path, summaries: list[dict[str, Any]]) -> str:
+    if not summaries:
+        raise ValueError("Cannot render report without summaries")
+
+    rows = compute_rows(summaries)
+    config = summaries[0].get("config", {})
+    generated_at = datetime.now(timezone.utc).isoformat()
+    headline_cards = render_headline_cards(rows)
+
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LLM Harness Benchmark Report</title>
+  <style>
+{css()}
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <p class="eyebrow">Local synthetic OpenAI-style streaming benchmark</p>
+        <h1>LLM Harness Benchmark Report</h1>
+      </div>
+      <dl class="meta">
+        <div><dt>Results</dt><dd>{escape(str(results_dir))}</dd></div>
+        <div><dt>Generated</dt><dd>{escape(generated_at)}</dd></div>
+      </dl>
+    </header>
+
+    <section>
+      <h2>Workload</h2>
+      {render_workload(config)}
+    </section>
+
+    <section>
+      <h2>Headline Metrics</h2>
+      {headline_cards}
+    </section>
+
+    <section>
+      <h2>Throughput</h2>
+      <div class="chart-grid">
+        {bar_chart(rows, "requests_per_second", "Requests/sec", higher_is_better=True)}
+        {bar_chart(rows, "chunks_per_second", "Chunks/sec", higher_is_better=True)}
+      </div>
+    </section>
+
+    <section>
+      <h2>Request Latency</h2>
+      <div class="chart-grid">
+        {grouped_latency_chart(rows, "request", "Request latency percentiles")}
+        {grouped_latency_chart(rows, "ttfc", "Time To First Chunk percentiles")}
+      </div>
+    </section>
+
+    <section>
+      <h2>Efficiency Table</h2>
+      {render_table(rows)}
+    </section>
+
+    <section>
+      <h2>How Each Client Scales</h2>
+      {render_scaling_notes()}
+    </section>
+
+    <section>
+      <h2>Caveats</h2>
+      {render_caveats()}
+    </section>
+  </main>
+</body>
+</html>
+"""
+
+
+def write_report(results_dir: Path, output: Path) -> Path:
+    summaries = load_summaries(results_dir)
+    if not summaries:
+        raise FileNotFoundError(f"No summary.json files found under {results_dir}")
+    html_report = render_report(results_dir, summaries)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(html_report)
+    return output
+
+
+def first_metric(rows: list[dict[str, Any]], language: str, metric: str) -> float | None:
+    for item in rows:
+        if item.get("language") == language:
+            return float(item["summary"].get(metric, 0.0))
+    return None
+
+
+def first_metric_by_implementation(rows: list[dict[str, Any]], implementation: str, metric: str) -> float | None:
+    for item in rows:
+        if item.get("implementation") == implementation:
+            return float(item["summary"].get(metric, 0.0))
+    return None
+
+
+def ratio(value: float, baseline: float | None) -> float | None:
+    if baseline is None or baseline <= 0:
+        return None
+    return value / baseline
+
+
+def render_headline_cards(rows: list[dict[str, Any]]) -> str:
+    best_rps = max(rows, key=lambda row: row["summary"].get("requests_per_second", 0.0))
+    best_chunks = max(rows, key=lambda row: row["summary"].get("chunks_per_second", 0.0))
+    best_p95 = min(rows, key=lambda row: row["summary"].get("p95_request_latency_ms", float("inf")))
+    best_ttfc = min(rows, key=lambda row: row["summary"].get("p95_time_to_first_chunk_ms", float("inf")))
+    failures = sum(int(row["summary"].get("failed_requests", 0)) for row in rows)
+
+    cards = [
+        ("Best requests/sec", best_rps["label"], format_number(best_rps["summary"]["requests_per_second"])),
+        ("Best chunks/sec", best_chunks["label"], format_number(best_chunks["summary"]["chunks_per_second"])),
+        ("Lowest p95 request latency", best_p95["label"], f"{format_number(best_p95['summary']['p95_request_latency_ms'])} ms"),
+        ("Lowest p95 TTFC", best_ttfc["label"], f"{format_number(best_ttfc['summary']['p95_time_to_first_chunk_ms'])} ms"),
+        ("Total failures", "all clients", str(failures)),
+    ]
+
+    rendered = []
+    for title, label, value in cards:
+        rendered.append(
+            f"""<article class="metric-card">
+  <h3>{escape(title)}</h3>
+  <strong>{escape(value)}</strong>
+  <p>{escape(label)}</p>
+</article>"""
+        )
+    return f"<div class=\"metric-grid\">{''.join(rendered)}</div>"
+
+
+def render_workload(config: dict[str, Any]) -> str:
+    items = [
+        ("total requests", config.get("total_requests", "n/a")),
+        ("concurrency", config.get("concurrency", "n/a")),
+        ("chunks/response", config.get("chunks_per_response", "n/a")),
+        ("chunk bytes", config.get("chunk_bytes", "n/a")),
+        ("delay us", config.get("delay_us", "n/a")),
+        ("warmup requests", config.get("warmup_requests", "n/a")),
+    ]
+    cells = [f"<div><dt>{escape(label)}</dt><dd>{escape(str(value))}</dd></div>" for label, value in items]
+    return f"<dl class=\"workload-grid\">{''.join(cells)}</dl>"
+
+
+def bar_chart(rows: list[dict[str, Any]], metric: str, title: str, higher_is_better: bool) -> str:
+    values = [float(row["summary"].get(metric, 0.0)) for row in rows]
+    max_value = max(values) if values else 0.0
+    chart_rows = []
+    for row, value in zip(rows, values):
+        width = 0 if max_value == 0 else max(2, int((value / max_value) * 100))
+        color = IMPLEMENTATION_COLORS.get(row["label"], "#475569")
+        chart_rows.append(
+            f"""<div class="bar-row">
+  <span>{escape(row['label'])}</span>
+  <div class="bar-track"><div class="bar" style="width:{width}%;background:{color}"></div></div>
+  <strong>{escape(format_number(value))}</strong>
+</div>"""
+        )
+    direction = "higher is better" if higher_is_better else "lower is better"
+    return f"""<article class="chart-card">
+  <h3>{escape(title)}</h3>
+  <p>{direction}</p>
+  <div class="bar-chart">{''.join(chart_rows)}</div>
+</article>"""
+
+
+def grouped_latency_chart(rows: list[dict[str, Any]], kind: str, title: str) -> str:
+    if kind == "request":
+        metrics = [
+            ("p50", "p50_request_latency_ms"),
+            ("p95", "p95_request_latency_ms"),
+            ("p99", "p99_request_latency_ms"),
+        ]
+    else:
+        metrics = [
+            ("p50", "p50_time_to_first_chunk_ms"),
+            ("p95", "p95_time_to_first_chunk_ms"),
+            ("p99", "p99_time_to_first_chunk_ms"),
+        ]
+
+    width = 760
+    row_height = 34
+    label_width = 180
+    chart_width = 500
+    height = 56 + (len(rows) * len(metrics) * row_height)
+    all_values = [float(row["summary"].get(metric, 0.0)) for row in rows for _, metric in metrics]
+    max_value = max(all_values) if all_values else 0.0
+    svg_parts = [
+        f'<svg viewBox="0 0 {width} {height}" role="img" aria-label="{escape(title)}">',
+        f'<text x="0" y="20" class="svg-title">{escape(title)}</text>',
+    ]
+    y = 48
+    for row in rows:
+        color = IMPLEMENTATION_COLORS.get(row["label"], "#475569")
+        for percentile_label, metric in metrics:
+            value = float(row["summary"].get(metric, 0.0))
+            bar_width = 0 if max_value == 0 else max(1, int((value / max_value) * chart_width))
+            svg_parts.append(f'<text x="0" y="{y + 15}" class="svg-label">{escape(row["label"])} {percentile_label}</text>')
+            svg_parts.append(f'<rect x="{label_width}" y="{y}" width="{bar_width}" height="20" fill="{color}" rx="3"></rect>')
+            svg_parts.append(f'<text x="{label_width + bar_width + 8}" y="{y + 15}" class="svg-value">{escape(format_number(value))} ms</text>')
+            y += row_height
+    svg_parts.append("</svg>")
+    return f"<article class=\"chart-card svg-card\">{''.join(svg_parts)}</article>"
+
+
+def render_table(rows: list[dict[str, Any]]) -> str:
+    headers = [
+        "Implementation",
+        "Req/s",
+        "Chunks/s",
+        "p95 req ms",
+        "p95 TTFC ms",
+        "Per-chunk ms",
+        "Failures",
+        "vs Python",
+        "vs Rust reqwest",
+    ]
+    body = []
+    for row in rows:
+        summary = row["summary"]
+        body.append(
+            "<tr>"
+            f"<th>{escape(row['label'])}</th>"
+            f"<td>{escape(format_number(summary.get('requests_per_second', 0.0)))}</td>"
+            f"<td>{escape(format_number(summary.get('chunks_per_second', 0.0)))}</td>"
+            f"<td>{escape(format_number(summary.get('p95_request_latency_ms', 0.0)))}</td>"
+            f"<td>{escape(format_number(summary.get('p95_time_to_first_chunk_ms', 0.0)))}</td>"
+            f"<td>{escape(format_number(summary.get('per_chunk_overhead_ms', 0.0), digits=6))}</td>"
+            f"<td>{escape(str(summary.get('failed_requests', 0)))}</td>"
+            f"<td>{escape(format_ratio(row['speedup_vs_python']))}</td>"
+            f"<td>{escape(format_ratio(row['speedup_vs_rust_reqwest']))}</td>"
+            "</tr>"
+        )
+    header_html = "".join(f"<th>{escape(header)}</th>" for header in headers)
+    return f"<div class=\"table-wrap\"><table><thead><tr>{header_html}</tr></thead><tbody>{''.join(body)}</tbody></table></div>"
+
+
+def render_scaling_notes() -> str:
+    notes = [
+        (
+            "Python asyncio + httpx",
+            "The Python harness is expected to saturate first on interpreter scheduling, Python object allocation, JSON parsing, and async stream iteration overhead. It is useful as a productivity baseline, but its per-chunk overhead dominates when the server emits tiny zero-delay chunks.",
+        ),
+        (
+            "Go net/http + goroutines",
+            "The Go harness uses a small worker pool, blocking reads, bufio, and the mature standard HTTP transport. This shape tends to scale well for many concurrent local HTTP streams because goroutine scheduling and the transport path are both efficient for this workload.",
+        ),
+        (
+            "Rust reqwest + Tokio",
+            "The reqwest harness has strong latency behavior and much lower overhead than Python, but reqwest adds a higher-level client abstraction over Hyper. In this benchmark the workload is so small and fast that those layers are visible.",
+        ),
+        (
+            "Rust Hyper + Tokio",
+            "The Hyper harness removes part of the reqwest layer and drains lower-level HTTP body frames directly. It should improve the Rust result for this synthetic workload, while the current allocating SSE parser and JSON parsing still limit absolute throughput.",
+        ),
+    ]
+    rendered = [f"<article><h3>{escape(title)}</h3><p>{escape(text)}</p></article>" for title, text in notes]
+    return f"<div class=\"notes-grid\">{''.join(rendered)}</div>"
+
+
+def render_caveats() -> str:
+    caveats = [
+        "This is a localhost synthetic benchmark, not a real LLM provider benchmark.",
+        "No TLS, model inference, provider queueing, or WAN latency is included.",
+        "Very high concurrency can hit file descriptor limits such as ulimit -n.",
+        "The benchmark measures harness/client overhead rather than absolute provider performance.",
+        "Single runs are directional; repeated runs are needed for rigorous claims.",
+    ]
+    return "<ul class=\"caveats\">" + "".join(f"<li>{escape(item)}</li>" for item in caveats) + "</ul>"
+
+
+def format_number(value: Any, digits: int = 2) -> str:
+    if isinstance(value, int):
+        return f"{value:,}"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    return f"{number:,.{digits}f}"
+
+
+def format_ratio(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value:.2f}x"
+
+
+def escape(value: str) -> str:
+    return html.escape(value, quote=True)
+
+
+def css() -> str:
+    return """
+:root {
+  color-scheme: light;
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #f8fafc;
+  color: #111827;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: #f8fafc; }
+main { width: min(1180px, calc(100vw - 40px)); margin: 0 auto; padding: 32px 0 56px; }
+header { display: flex; justify-content: space-between; gap: 24px; align-items: flex-start; margin-bottom: 28px; }
+h1 { font-size: 32px; line-height: 1.15; margin: 6px 0 0; letter-spacing: 0; }
+h2 { font-size: 20px; margin: 0 0 14px; letter-spacing: 0; }
+h3 { font-size: 15px; margin: 0 0 8px; letter-spacing: 0; }
+p { margin: 0; color: #475569; line-height: 1.55; }
+section { margin-top: 22px; padding: 20px; border: 1px solid #e2e8f0; border-radius: 8px; background: #ffffff; }
+.eyebrow { color: #0f766e; font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
+.meta, .workload-grid { margin: 0; display: grid; gap: 10px; }
+.meta { min-width: 360px; }
+.meta div, .workload-grid div { padding: 10px 12px; border: 1px solid #e2e8f0; border-radius: 6px; background: #f8fafc; }
+dt { color: #64748b; font-size: 12px; text-transform: uppercase; font-weight: 700; letter-spacing: .04em; }
+dd { margin: 3px 0 0; font-weight: 700; color: #111827; overflow-wrap: anywhere; }
+.workload-grid { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+.metric-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; }
+.metric-card { border: 1px solid #e2e8f0; background: #f8fafc; border-radius: 6px; padding: 14px; min-height: 122px; }
+.metric-card strong { display: block; font-size: 24px; margin: 8px 0 4px; }
+.chart-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.chart-card { border: 1px solid #e2e8f0; border-radius: 6px; padding: 16px; background: #ffffff; min-width: 0; }
+.bar-chart { display: grid; gap: 12px; margin-top: 14px; }
+.bar-row { display: grid; grid-template-columns: minmax(150px, 210px) 1fr minmax(90px, auto); gap: 12px; align-items: center; font-size: 13px; }
+.bar-track { height: 16px; background: #e5e7eb; border-radius: 999px; overflow: hidden; }
+.bar { height: 100%; border-radius: 999px; }
+.svg-card svg { width: 100%; height: auto; display: block; }
+.svg-title { font: 700 17px system-ui, sans-serif; fill: #111827; }
+.svg-label { font: 12px system-ui, sans-serif; fill: #334155; }
+.svg-value { font: 12px system-ui, sans-serif; fill: #475569; }
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { border-bottom: 1px solid #e2e8f0; padding: 10px 8px; text-align: right; white-space: nowrap; }
+th:first-child, td:first-child { text-align: left; }
+thead th { color: #475569; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+.notes-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.notes-grid article { border: 1px solid #e2e8f0; border-radius: 6px; padding: 14px; background: #f8fafc; }
+.caveats { margin: 0; padding-left: 20px; color: #475569; line-height: 1.65; }
+@media (max-width: 900px) {
+  header, .chart-grid { grid-template-columns: 1fr; display: grid; }
+  .meta { min-width: 0; }
+  .workload-grid, .metric-grid, .notes-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 640px) {
+  main { width: min(100vw - 24px, 1180px); padding-top: 20px; }
+  .workload-grid, .metric-grid, .notes-grid { grid-template-columns: 1fr; }
+  .bar-row { grid-template-columns: 1fr; gap: 6px; }
+}
+"""
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Generate a static HTML benchmark report.")
+    parser.add_argument("results_dir", nargs="?", default=None, help="Result run directory. Defaults to newest under results/.")
+    parser.add_argument("--output", default="reports/latest/index.html", help="Output HTML path.")
+    args = parser.parse_args()
+
+    results_dir = Path(args.results_dir) if args.results_dir else find_latest_results_dir(Path("results"))
+    output = write_report(results_dir, Path(args.output))
+    print(output)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
