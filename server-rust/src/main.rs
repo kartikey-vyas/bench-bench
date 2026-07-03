@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::{net::SocketAddr, time::Duration};
 
 use clap::Parser;
 use hyper::body::Incoming;
@@ -24,9 +24,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let router = app();
 
     loop {
-        let (socket, _remote) = listener.accept().await?;
-        // Nagle + delayed ACK would distort millisecond-scale SSE pacing.
-        socket.set_nodelay(true)?;
+        let (socket, _remote) = match listener.accept().await {
+            Ok(accepted) => accepted,
+            Err(error) => {
+                // Transient accept failures (e.g. fd exhaustion) must not kill the
+                // server mid-benchmark; back off briefly instead of hot-spinning.
+                eprintln!("accept error: {error}");
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                continue;
+            }
+        };
+        if let Err(error) = socket.set_nodelay(true) {
+            eprintln!("set_nodelay error: {error}");
+            continue;
+        }
         let service = router.clone();
         tokio::spawn(async move {
             let io = TokioIo::new(socket);
