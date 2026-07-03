@@ -1,4 +1,19 @@
-use rust_client::{aggregate_summary, percentile, ClientKind, Config, Measurement, SseDecoder};
+use rust_client::{aggregate_summary, percentile, ClientKind, Config, Measurement, SseDecoder, EventBoundaryCounter};
+
+#[test]
+fn boundary_counter_handles_splits_across_feeds() {
+    let mut counter = EventBoundaryCounter::new();
+    assert_eq!(counter.feed(b"data: a\n"), 0);
+    assert_eq!(counter.feed(b"\ndata: b\n\n"), 2);
+    assert_eq!(counter.feed(b"data: c\n\ndata: d\n\n"), 2);
+}
+
+#[test]
+fn client_kind_parses_drain() {
+    let drain = ClientKind::parse("drain").unwrap();
+    assert_eq!(drain.implementation(), "drain-hyper");
+    assert_eq!(drain.output_name(), "rust-drain");
+}
 
 #[test]
 fn decoder_buffers_partial_events() {

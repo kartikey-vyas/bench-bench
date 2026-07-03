@@ -17,6 +17,36 @@ use hyper_util::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+/// Counts SSE event boundaries ("\n\n") in a raw byte stream without
+/// materializing events. Split-safe across feed() calls.
+#[derive(Debug, Default)]
+pub struct EventBoundaryCounter {
+    pending_newline: bool,
+}
+
+impl EventBoundaryCounter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn feed(&mut self, bytes: &[u8]) -> usize {
+        let mut count = 0;
+        for &byte in bytes {
+            if byte == b'\n' {
+                if self.pending_newline {
+                    count += 1;
+                    self.pending_newline = false;
+                } else {
+                    self.pending_newline = true;
+                }
+            } else {
+                self.pending_newline = false;
+            }
+        }
+        count
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SseDecoder {
     buffer: String,
@@ -178,6 +208,7 @@ pub struct ResultEnvelope {
 pub enum ClientKind {
     Reqwest,
     Hyper,
+    Drain,
 }
 
 impl ClientKind {
@@ -185,8 +216,9 @@ impl ClientKind {
         match value {
             "reqwest" => Ok(Self::Reqwest),
             "hyper" => Ok(Self::Hyper),
+            "drain" => Ok(Self::Drain),
             other => Err(format!(
-                "unsupported Rust client {other:?}; expected reqwest or hyper"
+                "unsupported Rust client {other:?}; expected reqwest, hyper, or drain"
             )),
         }
     }
@@ -195,6 +227,7 @@ impl ClientKind {
         match self {
             Self::Reqwest => "reqwest-tokio",
             Self::Hyper => "hyper-tokio",
+            Self::Drain => "drain-hyper",
         }
     }
 
@@ -202,6 +235,7 @@ impl ClientKind {
         match self {
             Self::Reqwest => "rust-reqwest",
             Self::Hyper => "rust-hyper",
+            Self::Drain => "rust-drain",
         }
     }
 }
@@ -416,10 +450,65 @@ async fn drain_hyper_body(mut timing: StreamTiming, mut body: Incoming) -> Measu
     timing.measurement(saw_done, chunks, content_bytes)
 }
 
+pub async fn run_one_drain_request(
+    client: &HyperHttpClient,
+    config: &Config,
+    worker_index: usize,
+    sequence: usize,
+) -> Measurement {
+    let started = Instant::now();
+    let mut timing = StreamTiming::new(started);
+    let body = match serde_json::to_vec(&config.request_payload(worker_index, sequence, "rust-drain")) {
+        Ok(body) => body,
+        Err(_) => return timing.measurement(false, 0, 0),
+    };
+
+    let request = match Request::post(config.endpoint())
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Full::new(Bytes::from(body)))
+    {
+        Ok(request) => request,
+        Err(_) => return timing.measurement(false, 0, 0),
+    };
+
+    let response = match client.request(request).await {
+        Ok(response) => response,
+        Err(_) => return timing.measurement(false, 0, 0),
+    };
+    if !response.status().is_success() {
+        return timing.measurement(false, 0, 0);
+    }
+
+    let mut incoming = response.into_body();
+    let mut counter = EventBoundaryCounter::new();
+    let mut total_events = 0usize;
+    let mut wire_bytes = 0usize;
+
+    while let Some(next) = incoming.frame().await {
+        let frame = match next {
+            Ok(frame) => frame,
+            Err(_) => return timing.measurement(false, total_events.saturating_sub(3), wire_bytes),
+        };
+        let Some(data) = frame.data_ref() else {
+            continue;
+        };
+        wire_bytes += data.len();
+        let boundaries = counter.feed(data);
+        if boundaries > 0 {
+            timing.observe_event();
+            total_events += boundaries;
+        }
+    }
+
+    // role + finish + [DONE] are not content chunks.
+    timing.measurement(true, total_events.saturating_sub(3), wire_bytes)
+}
+
 #[derive(Clone)]
 pub enum AnyClient {
     Reqwest(reqwest::Client),
     Hyper(HyperHttpClient),
+    Drain(HyperHttpClient),
 }
 
 pub fn build_client(kind: ClientKind) -> Result<AnyClient, Box<dyn Error + Send + Sync>> {
@@ -427,6 +516,9 @@ pub fn build_client(kind: ClientKind) -> Result<AnyClient, Box<dyn Error + Send 
         ClientKind::Reqwest => AnyClient::Reqwest(reqwest::Client::builder().build()?),
         ClientKind::Hyper => {
             AnyClient::Hyper(HyperClient::builder(TokioExecutor::new()).build_http())
+        }
+        ClientKind::Drain => {
+            AnyClient::Drain(HyperClient::builder(TokioExecutor::new()).build_http())
         }
     })
 }
@@ -443,6 +535,9 @@ async fn run_one(
         }
         AnyClient::Hyper(inner) => {
             run_one_hyper_request(inner, config, worker_index, sequence).await
+        }
+        AnyClient::Drain(inner) => {
+            run_one_drain_request(inner, config, worker_index, sequence).await
         }
     }
 }
