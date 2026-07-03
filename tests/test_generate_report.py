@@ -15,18 +15,21 @@ def write_summary(path: Path, language: str, implementation: str, req_s: float, 
                 "implementation": implementation,
                 "started_at": "2026-06-30T00:00:00Z",
                 "config": {
-                    "total_requests": 10,
+                    "base_url": "http://127.0.0.1:8080",
+                    "duration_seconds": 2.0,
+                    "warmup_seconds": 0.5,
                     "concurrency": 2,
                     "chunks_per_response": 3,
                     "chunk_bytes": 8,
-                    "delay_us": 0,
-                    "warmup_requests": 1,
+                    "ttfc_ms": 200,
+                    "events_per_second": 500,
                     "output_dir": "results",
                 },
                 "summary": {
                     "duration_ms": 10.0,
                     "successful_requests": 10,
                     "failed_requests": 0,
+                    "incomplete_requests": 0,
                     "total_chunks": 30,
                     "total_bytes": 240,
                     "requests_per_second": req_s,
@@ -39,7 +42,15 @@ def write_summary(path: Path, language: str, implementation: str, req_s: float, 
                     "p50_time_to_first_chunk_ms": 0.3,
                     "p95_time_to_first_chunk_ms": 0.5,
                     "p99_time_to_first_chunk_ms": 0.8,
-                    "per_chunk_overhead_ms": 0.1,
+                    "p50_max_gap_ms": 1.0,
+                    "p95_max_gap_ms": 2.0,
+                    "p99_max_gap_ms": 3.0,
+                    "max_max_gap_ms": 4.0,
+                    "p50_stream_stretch": 1.0,
+                    "p95_stream_stretch": 1.1,
+                    "p99_stream_stretch": 1.2,
+                    "ideal_events_per_second": 1000.0,
+                    "efficiency": 0.95,
                 },
             }
         )
@@ -98,9 +109,9 @@ class GenerateReportTests(unittest.TestCase):
         self.assertIn("Request Latency", html)
         self.assertIn("Time To First Chunk", html)
         self.assertIn("Python asyncio-httpx", html)
-        self.assertIn("Go net/http + goroutines", html)
-        self.assertIn("Rust Hyper + Tokio", html)
         self.assertIn("<svg", html)
+        self.assertIn("Efficiency", html)
+        self.assertNotIn("How Each Client Scales", html)
 
     def test_render_report_groups_latency_percentiles_per_client_lane(self):
         summaries = [
@@ -126,18 +137,21 @@ def make_summary(language: str, implementation: str, req_s: float, chunks_s: flo
         "implementation": implementation,
         "started_at": "2026-06-30T00:00:00Z",
         "config": {
-            "total_requests": 10,
+            "base_url": "http://127.0.0.1:8080",
+            "duration_seconds": 2.0,
+            "warmup_seconds": 0.5,
             "concurrency": 2,
             "chunks_per_response": 3,
             "chunk_bytes": 8,
-            "delay_us": 0,
-            "warmup_requests": 1,
+            "ttfc_ms": 200,
+            "events_per_second": 500,
             "output_dir": "results",
         },
         "summary": {
             "duration_ms": 10.0,
             "successful_requests": 10,
             "failed_requests": 0,
+            "incomplete_requests": 0,
             "total_chunks": 30,
             "total_bytes": 240,
             "requests_per_second": req_s,
@@ -150,7 +164,15 @@ def make_summary(language: str, implementation: str, req_s: float, chunks_s: flo
             "p50_time_to_first_chunk_ms": 0.3,
             "p95_time_to_first_chunk_ms": 0.5,
             "p99_time_to_first_chunk_ms": 0.8,
-            "per_chunk_overhead_ms": 0.1,
+            "p50_max_gap_ms": 1.0,
+            "p95_max_gap_ms": 2.0,
+            "p99_max_gap_ms": 3.0,
+            "max_max_gap_ms": 4.0,
+            "p50_stream_stretch": 1.0,
+            "p95_stream_stretch": 1.1,
+            "p99_stream_stretch": 1.2,
+            "ideal_events_per_second": 1000.0,
+            "efficiency": 0.95,
         },
     }
 

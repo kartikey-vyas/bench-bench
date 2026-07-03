@@ -33,13 +33,15 @@ def print_table(summaries: list[dict[str, Any]]) -> None:
                 item.get("implementation", ""),
                 format_number(summary["requests_per_second"]),
                 format_number(summary["chunks_per_second"]),
+                format_number(summary.get("efficiency", 0.0)),
                 format_number(summary["p95_request_latency_ms"]),
                 format_number(summary["failed_requests"]),
+                format_number(summary.get("incomplete_requests", 0)),
                 item["_path"],
             ]
         )
 
-    headers = ["language", "implementation", "req/s", "chunks/s", "p95 req ms", "failures", "file"]
+    headers = ["language", "implementation", "req/s", "chunks/s", "efficiency", "p95 req ms", "failures", "incomplete", "file"]
     widths = [len(header) for header in headers]
     for row in rows:
         widths = [max(width, len(cell)) for width, cell in zip(widths, row)]

@@ -1,4 +1,4 @@
-.PHONY: test test-python test-go test-rust smoke compare
+.PHONY: test test-python test-go test-rust smoke compare sweep sweep-smoke sweep-report
 
 test: test-python test-go test-rust
 
@@ -17,3 +17,12 @@ smoke:
 
 compare:
 	python3 scripts/compare_results.py results
+
+sweep:
+	python3 scripts/run_sweep.py --config config/sweep.default.json
+
+sweep-smoke:
+	python3 scripts/run_sweep.py --config config/sweep.smoke.json
+
+sweep-report:
+	python3 scripts/generate_sweep_report.py

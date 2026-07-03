@@ -8,8 +8,8 @@ This repo is a local benchmark demo for comparing Python, Go, and Rust harness o
 - `bench_harness/`: Python config, SSE parser, metrics, and async `httpx` client.
 - `go-client/`: Go benchmark client using the standard `net/http` stack.
 - `rust-client/`: Rust benchmark client using Tokio with selectable `reqwest` and lower-level Hyper paths.
-- `config/`: shared workload JSON files.
-- `scripts/`: smoke runner and result comparison table.
+- `config/`: shared workload and sweep JSON files.
+- `scripts/`: smoke runner, concurrency sweep runner, result comparison table, and report generators.
 
 ## Prerequisites
 
@@ -17,8 +17,6 @@ This repo is a local benchmark demo for comparing Python, Go, and Rust harness o
 - `uv` for Python dependency setup, or another way to install `httpx`
 - Go 1.22+
 - Rust stable with `cargo`
-
-At implementation time in this environment, `cargo`, `rustc`, and `go` were not available on `PATH`, so Python unit tests were run locally and Go/Rust verification commands were recorded as toolchain-blocked.
 
 ## Setup
 
@@ -32,6 +30,12 @@ Or install the Python dependency manually:
 python3 -m pip install httpx
 ```
 
+The Python client depends on `httpx`, which is only installed in the project
+virtualenv, not the system `python3`. Always run the smoke and sweep runners
+with the project's Python (`uv run python scripts/run_sweep.py ...` or
+`.venv/bin/python scripts/run_sweep.py ...`) — running them with a bare
+`python3` will fail as soon as the Python client is invoked.
+
 ## Tests
 
 ```bash
@@ -44,10 +48,12 @@ The Python tests cover the shared SSE parser, workload config loader, and metric
 
 ## Smoke Run
 
-Run the full local smoke benchmark:
+Run the full local smoke benchmark (use the project venv's Python so the
+Python client can import `httpx`):
 
 ```bash
-python3 scripts/run_smoke.py --config config/workload.smoke.json
+uv run python scripts/run_smoke.py --config config/workload.smoke.json
+# or: .venv/bin/python scripts/run_smoke.py --config config/workload.smoke.json
 ```
 
 The smoke runner starts the Rust synthetic server on `127.0.0.1:8080`, runs available clients, writes timestamped summaries under `results/`, and prints a comparison table.
@@ -81,7 +87,7 @@ uv run python scripts/generate_report.py results/20260629T141233Z --output repor
 open reports/latest/index.html
 ```
 
-The report includes throughput charts, latency charts, per-chunk overhead, speedups, scaling explanations for each client implementation, and benchmark caveats. Generated reports are ignored by git by default.
+The report includes throughput charts, latency distribution charts, an efficiency/speedup table, and benchmark caveats. Generated reports are ignored by git by default. For a concurrency-vs-efficiency view across many cells, see the "Concurrency Sweep" section below.
 
 ## Workloads
 
@@ -93,15 +99,21 @@ Workload fields:
 ```json
 {
   "base_url": "http://127.0.0.1:8080",
-  "total_requests": 10000,
-  "concurrency": 256,
+  "duration_seconds": 20.0,
+  "warmup_seconds": 3.0,
+  "concurrency": 64,
   "chunks_per_response": 512,
-  "chunk_bytes": 32,
-  "delay_us": 0,
-  "warmup_requests": 500,
+  "chunk_bytes": 8,
+  "ttfc_ms": 200,
+  "events_per_second": 500,
   "output_dir": "results"
 }
 ```
+
+- `duration_seconds` / `warmup_seconds`: each client runs a fixed-duration closed loop at the given `concurrency`; the first `warmup_seconds` of measurements are discarded before the timed window starts.
+- `ttfc_ms`: server-side delay before it emits the first SSE event of a response (simulates model "time to first token").
+- `events_per_second`: server pacing rate for chunks after the first one. `0` means the server streams as fast as it can (no pacing) — used by the `max` tier in `config/sweep.default.json`.
+- Every response is one SSE stream: a role chunk, then `chunks_per_response` content chunks of `chunk_bytes` bytes each, then a finish chunk, then a `[DONE]` sentinel.
 
 ## Result Shape
 
@@ -113,23 +125,74 @@ Each client writes `summary.json`:
   "implementation": "reqwest-tokio",
   "started_at": "2026-06-29T00:00:00Z",
   "config": {
-    "total_requests": 10000,
-    "concurrency": 256,
+    "base_url": "http://127.0.0.1:8080",
+    "duration_seconds": 20.0,
+    "warmup_seconds": 3.0,
+    "concurrency": 64,
     "chunks_per_response": 512,
-    "chunk_bytes": 32,
-    "delay_us": 0
+    "chunk_bytes": 8,
+    "ttfc_ms": 200,
+    "events_per_second": 500,
+    "output_dir": "results"
   },
   "summary": {
-    "duration_ms": 1234.5,
-    "successful_requests": 10000,
+    "duration_ms": 20000.4,
+    "successful_requests": 5142,
+    "incomplete_requests": 0,
     "failed_requests": 0,
-    "total_chunks": 640000,
-    "total_bytes": 20480000,
-    "requests_per_second": 8100.4,
-    "chunks_per_second": 518425.6,
-    "p95_request_latency_ms": 41.2
+    "total_chunks": 2632704,
+    "total_bytes": 21061632,
+    "requests_per_second": 257.1,
+    "chunks_per_second": 131635.2,
+    "mean_request_latency_ms": 245.9,
+    "p50_request_latency_ms": 244.1,
+    "p95_request_latency_ms": 251.8,
+    "p99_request_latency_ms": 260.3,
+    "mean_time_to_first_chunk_ms": 200.4,
+    "p50_time_to_first_chunk_ms": 200.1,
+    "p95_time_to_first_chunk_ms": 201.9,
+    "p99_time_to_first_chunk_ms": 204.7,
+    "p50_max_gap_ms": 2.1,
+    "p95_max_gap_ms": 2.6,
+    "p99_max_gap_ms": 3.4,
+    "max_max_gap_ms": 4.0,
+    "p50_stream_stretch": 0.97,
+    "p95_stream_stretch": 1.01,
+    "p99_stream_stretch": 1.05,
+    "ideal_events_per_second": 133120.0,
+    "efficiency": 0.989
   }
 }
 ```
 
+Notes on the less obvious `summary` fields:
+
+- `incomplete_requests`: requests that finished (no transport error) but delivered fewer than `chunks_per_response` content chunks — excluded from the latency/gap/stretch stats, and always distinct from `failed_requests` (transport/HTTP errors).
+- `p50/p95/p99/max_max_gap_ms`: percentiles of each request's largest inter-event gap, i.e. how "bursty" event delivery was within a stream.
+- `p50/p95/p99_stream_stretch`: each request's wall-clock stream duration divided by the ideal duration implied by `events_per_second`; `1.0` means the stream was paced exactly on schedule, `>1.0` means it ran slower than scheduled.
+- `ideal_events_per_second` / `efficiency`: the achievable closed-loop ideal throughput at this `concurrency` (accounting for `ttfc_ms` dead time before pacing starts) and the fraction of it the client actually achieved. `efficiency` near `1.0` means the client is keeping up with the server's schedule; a low value points to client-side overhead rather than the server.
+
 This normalized shape is intended to support a simple visualization layer later without changing benchmark clients.
+
+## Concurrency Sweep
+
+Run the full tier × concurrency sweep (builds all binaries, starts the server,
+runs every client per cell, records server schedule-slip stats and CPU):
+
+```bash
+make sweep          # full sweep, hours — tune config/sweep.default.json
+make sweep-smoke    # 2-minute end-to-end sanity sweep
+make sweep-report   # writes reports/sweep/index.html from the newest run
+```
+
+Per (tier, client), concurrency escalation stops when failures exceed
+`stop_failure_fraction`, mean efficiency drops below `stop_efficiency_below`,
+or mean p95 TTFC excess exceeds `stop_ttfc_excess_p95_ms` — the stopping
+concurrency is that client's knee for the tier, listed in the report and in
+`results/<run>/sweep.json`.
+
+The `drain` client reads raw bytes without SSE/JSON parsing: it calibrates the
+ceiling. If drain holds efficiency ≈ 1.0 at a concurrency where a real client
+does not, the gap is client overhead, not the server. Cross-check
+`server_stats.json` (schedule slip) and `cpu.json` per cell before attributing
+a knee to the client — on one machine, a saturated client can starve the server.

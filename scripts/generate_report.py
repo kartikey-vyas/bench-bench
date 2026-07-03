@@ -144,11 +144,6 @@ def render_report(results_dir: Path, summaries: list[dict[str, Any]]) -> str:
     </section>
 
     <section>
-      <h2>How Each Client Scales</h2>
-      {render_scaling_notes()}
-    </section>
-
-    <section>
       <h2>Caveats</h2>
       {render_caveats()}
     </section>
@@ -217,12 +212,13 @@ def render_headline_cards(rows: list[dict[str, Any]]) -> str:
 
 def render_workload(config: dict[str, Any]) -> str:
     items = [
-        ("total requests", config.get("total_requests", "n/a")),
+        ("duration s", config.get("duration_seconds", "n/a")),
+        ("warmup s", config.get("warmup_seconds", "n/a")),
         ("concurrency", config.get("concurrency", "n/a")),
         ("chunks/response", config.get("chunks_per_response", "n/a")),
         ("chunk bytes", config.get("chunk_bytes", "n/a")),
-        ("delay us", config.get("delay_us", "n/a")),
-        ("warmup requests", config.get("warmup_requests", "n/a")),
+        ("ttfc ms", config.get("ttfc_ms", "n/a")),
+        ("events/s/request", config.get("events_per_second", "n/a")),
     ]
     cells = [f"<div><dt>{escape(label)}</dt><dd>{escape(str(value))}</dd></div>" for label, value in items]
     return f"<dl class=\"workload-grid\">{''.join(cells)}</dl>"
@@ -367,8 +363,9 @@ def render_table(rows: list[dict[str, Any]]) -> str:
         "Chunks/s",
         "p95 req ms",
         "p95 TTFC ms",
-        "Per-chunk ms",
+        "Efficiency",
         "Failures",
+        "Incomplete",
         "vs Python",
         "vs Rust reqwest",
     ]
@@ -382,8 +379,9 @@ def render_table(rows: list[dict[str, Any]]) -> str:
             f"<td>{escape(format_number(summary.get('chunks_per_second', 0.0)))}</td>"
             f"<td>{escape(format_number(summary.get('p95_request_latency_ms', 0.0)))}</td>"
             f"<td>{escape(format_number(summary.get('p95_time_to_first_chunk_ms', 0.0)))}</td>"
-            f"<td>{escape(format_number(summary.get('per_chunk_overhead_ms', 0.0), digits=6))}</td>"
+            f"<td>{escape(format_number(summary.get('efficiency', 0.0), digits=3))}</td>"
             f"<td>{escape(str(summary.get('failed_requests', 0)))}</td>"
+            f"<td>{escape(str(summary.get('incomplete_requests', 0)))}</td>"
             f"<td>{escape(format_ratio(row['speedup_vs_python']))}</td>"
             f"<td>{escape(format_ratio(row['speedup_vs_rust_reqwest']))}</td>"
             "</tr>"
@@ -392,33 +390,11 @@ def render_table(rows: list[dict[str, Any]]) -> str:
     return f"<div class=\"table-wrap\"><table><thead><tr>{header_html}</tr></thead><tbody>{''.join(body)}</tbody></table></div>"
 
 
-def render_scaling_notes() -> str:
-    notes = [
-        (
-            "Python asyncio + httpx",
-            "The Python harness is expected to saturate first on interpreter scheduling, Python object allocation, JSON parsing, and async stream iteration overhead. It is useful as a productivity baseline, but its per-chunk overhead dominates when the server emits tiny zero-delay chunks.",
-        ),
-        (
-            "Go net/http + goroutines",
-            "The Go harness uses a small worker pool, blocking reads, bufio, and the mature standard HTTP transport. This shape tends to scale well for many concurrent local HTTP streams because goroutine scheduling and the transport path are both efficient for this workload.",
-        ),
-        (
-            "Rust reqwest + Tokio",
-            "The reqwest harness has strong latency behavior and much lower overhead than Python, but reqwest adds a higher-level client abstraction over Hyper. In this benchmark the workload is so small and fast that those layers are visible.",
-        ),
-        (
-            "Rust Hyper + Tokio",
-            "The Hyper harness removes part of the reqwest layer and drains lower-level HTTP body frames directly. It should improve the Rust result for this synthetic workload, while the current allocating SSE parser and JSON parsing still limit absolute throughput.",
-        ),
-    ]
-    rendered = [f"<article><h3>{escape(title)}</h3><p>{escape(text)}</p></article>" for title, text in notes]
-    return f"<div class=\"notes-grid\">{''.join(rendered)}</div>"
-
-
 def render_caveats() -> str:
     caveats = [
-        "This is a localhost synthetic benchmark, not a real LLM provider benchmark.",
-        "No TLS, model inference, provider queueing, or WAN latency is included.",
+        "This is a localhost synthetic benchmark, not a real LLM provider benchmark; clients are minimal hand-rolled loops, not official SDKs.",
+        "HTTP/1.1 cleartext only — no TLS or HTTP/2, unlike production providers.",
+        "No model inference, provider queueing, or WAN latency is included.",
         "Very high concurrency can hit file descriptor limits such as ulimit -n.",
         "The benchmark measures harness/client overhead rather than absolute provider performance.",
         "Single runs are directional; repeated runs are needed for rigorous claims.",
@@ -469,7 +445,7 @@ section { margin-top: 22px; padding: 20px; border: 1px solid #e2e8f0; border-rad
 .meta div, .workload-grid div { padding: 10px 12px; border: 1px solid #e2e8f0; border-radius: 6px; background: #f8fafc; }
 dt { color: #64748b; font-size: 12px; text-transform: uppercase; font-weight: 700; letter-spacing: .04em; }
 dd { margin: 3px 0 0; font-weight: 700; color: #111827; overflow-wrap: anywhere; }
-.workload-grid { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+.workload-grid { grid-template-columns: repeat(7, minmax(0, 1fr)); }
 .metric-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; }
 .metric-card { border: 1px solid #e2e8f0; background: #f8fafc; border-radius: 6px; padding: 14px; min-height: 122px; }
 .metric-card strong { display: block; font-size: 24px; margin: 8px 0 4px; }
@@ -497,17 +473,15 @@ table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th, td { border-bottom: 1px solid #e2e8f0; padding: 10px 8px; text-align: right; white-space: nowrap; }
 th:first-child, td:first-child { text-align: left; }
 thead th { color: #475569; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
-.notes-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
-.notes-grid article { border: 1px solid #e2e8f0; border-radius: 6px; padding: 14px; background: #f8fafc; }
 .caveats { margin: 0; padding-left: 20px; color: #475569; line-height: 1.65; }
 @media (max-width: 900px) {
   header, .chart-grid { grid-template-columns: 1fr; display: grid; }
   .meta { min-width: 0; }
-  .workload-grid, .metric-grid, .notes-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .workload-grid, .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 640px) {
   main { width: min(100vw - 24px, 1180px); padding-top: 20px; }
-  .workload-grid, .metric-grid, .notes-grid { grid-template-columns: 1fr; }
+  .workload-grid, .metric-grid { grid-template-columns: 1fr; }
   .bar-row { grid-template-columns: 1fr; gap: 6px; }
 }
 """
