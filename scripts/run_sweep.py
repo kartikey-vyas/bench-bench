@@ -233,13 +233,29 @@ def run_cell_client(
     print("+", " ".join(command))
     process = subprocess.Popen(command, cwd=ROOT)
     sampler = CpuSampler({"server": server_pid, "client": process.pid}).start()
-    returncode = process.wait()
+
+    timeout = sweep.warmup_seconds + sweep.duration_seconds + 120.0
+    timed_out = False
+    try:
+        returncode = process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+        print(f"warning: {client_name} timed out after {timeout:.0f}s, killed", file=sys.stderr)
+        timed_out = True
+        returncode = None
+    except Exception:
+        process.kill()
+        raise
+
     cpu = sampler.stop()
     server_stats = http_get_json(f"{sweep.base_url}/stats")
 
     (out_dir / "server_stats.json").write_text(json.dumps(server_stats, indent=2) + "\n")
     (out_dir / "cpu.json").write_text(json.dumps(cpu, indent=2) + "\n")
 
+    if timed_out:
+        return None
     if returncode != 0:
         print(f"warning: {client_name} exited {returncode}", file=sys.stderr)
         return None
@@ -248,6 +264,10 @@ def run_cell_client(
         print(f"warning: {client_name} wrote no summary.json", file=sys.stderr)
         return None
     return json.loads(summary_path.read_text())
+
+
+def write_sweep_record(run_dir: Path, record: dict[str, Any]) -> None:
+    (run_dir / "sweep.json").write_text(json.dumps(record, indent=2) + "\n")
 
 
 def main() -> int:
@@ -311,6 +331,8 @@ def main() -> int:
                         }
                         print(f"stop {tier.name}/{client_name} at c={concurrency}: {reason}")
 
+                write_sweep_record(run_dir, record)
+
                 if sweep.cooldown_seconds > 0:
                     time.sleep(sweep.cooldown_seconds)
     finally:
@@ -320,9 +342,9 @@ def main() -> int:
         except subprocess.TimeoutExpired:
             server.kill()
             server.wait(timeout=5)
+        record["finished_at"] = datetime.now(timezone.utc).isoformat()
+        write_sweep_record(run_dir, record)
 
-    record["finished_at"] = datetime.now(timezone.utc).isoformat()
-    (run_dir / "sweep.json").write_text(json.dumps(record, indent=2) + "\n")
     print(run_dir)
     return 0
 
