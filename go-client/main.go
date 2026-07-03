@@ -18,14 +18,15 @@ import (
 )
 
 type Config struct {
-	BaseURL           string `json:"base_url"`
-	TotalRequests     int    `json:"total_requests"`
-	Concurrency       int    `json:"concurrency"`
-	ChunksPerResponse int    `json:"chunks_per_response"`
-	ChunkBytes        int    `json:"chunk_bytes"`
-	DelayUS           int    `json:"delay_us"`
-	WarmupRequests    int    `json:"warmup_requests"`
-	OutputDir         string `json:"output_dir"`
+	BaseURL           string  `json:"base_url"`
+	DurationSeconds   float64 `json:"duration_seconds"`
+	WarmupSeconds     float64 `json:"warmup_seconds"`
+	Concurrency       int     `json:"concurrency"`
+	ChunksPerResponse int     `json:"chunks_per_response"`
+	ChunkBytes        int     `json:"chunk_bytes"`
+	TTFCMS            int     `json:"ttfc_ms"`
+	EventsPerSecond   int     `json:"events_per_second"`
+	OutputDir         string  `json:"output_dir"`
 }
 
 type Measurement struct {
@@ -34,25 +35,36 @@ type Measurement struct {
 	FirstChunkMS float64
 	Chunks       int
 	Bytes        int
+	MaxGapMS     float64
+	StreamMS     float64
 }
 
 type Summary struct {
-	DurationMS              float64 `json:"duration_ms"`
-	SuccessfulRequests      int     `json:"successful_requests"`
-	FailedRequests          int     `json:"failed_requests"`
-	TotalChunks             int     `json:"total_chunks"`
-	TotalBytes              int     `json:"total_bytes"`
-	RequestsPerSecond       float64 `json:"requests_per_second"`
-	ChunksPerSecond         float64 `json:"chunks_per_second"`
-	MeanRequestLatencyMS    float64 `json:"mean_request_latency_ms"`
-	P50RequestLatencyMS     float64 `json:"p50_request_latency_ms"`
-	P95RequestLatencyMS     float64 `json:"p95_request_latency_ms"`
-	P99RequestLatencyMS     float64 `json:"p99_request_latency_ms"`
-	MeanTimeToFirstChunkMS  float64 `json:"mean_time_to_first_chunk_ms"`
-	P50TimeToFirstChunkMS   float64 `json:"p50_time_to_first_chunk_ms"`
-	P95TimeToFirstChunkMS   float64 `json:"p95_time_to_first_chunk_ms"`
-	P99TimeToFirstChunkMS   float64 `json:"p99_time_to_first_chunk_ms"`
-	PerChunkOverheadMS      float64 `json:"per_chunk_overhead_ms"`
+	DurationMS             float64 `json:"duration_ms"`
+	SuccessfulRequests     int     `json:"successful_requests"`
+	IncompleteRequests     int     `json:"incomplete_requests"`
+	FailedRequests         int     `json:"failed_requests"`
+	TotalChunks            int     `json:"total_chunks"`
+	TotalBytes             int     `json:"total_bytes"`
+	RequestsPerSecond      float64 `json:"requests_per_second"`
+	ChunksPerSecond        float64 `json:"chunks_per_second"`
+	MeanRequestLatencyMS   float64 `json:"mean_request_latency_ms"`
+	P50RequestLatencyMS    float64 `json:"p50_request_latency_ms"`
+	P95RequestLatencyMS    float64 `json:"p95_request_latency_ms"`
+	P99RequestLatencyMS    float64 `json:"p99_request_latency_ms"`
+	MeanTimeToFirstChunkMS float64 `json:"mean_time_to_first_chunk_ms"`
+	P50TimeToFirstChunkMS  float64 `json:"p50_time_to_first_chunk_ms"`
+	P95TimeToFirstChunkMS  float64 `json:"p95_time_to_first_chunk_ms"`
+	P99TimeToFirstChunkMS  float64 `json:"p99_time_to_first_chunk_ms"`
+	P50MaxGapMS            float64 `json:"p50_max_gap_ms"`
+	P95MaxGapMS            float64 `json:"p95_max_gap_ms"`
+	P99MaxGapMS            float64 `json:"p99_max_gap_ms"`
+	MaxMaxGapMS            float64 `json:"max_max_gap_ms"`
+	P50StreamStretch       float64 `json:"p50_stream_stretch"`
+	P95StreamStretch       float64 `json:"p95_stream_stretch"`
+	P99StreamStretch       float64 `json:"p99_stream_stretch"`
+	IdealEventsPerSecond   float64 `json:"ideal_events_per_second"`
+	Efficiency             float64 `json:"efficiency"`
 }
 
 type Result struct {
@@ -125,8 +137,11 @@ func loadConfig(path string) (Config, error) {
 }
 
 func (config Config) validate() error {
-	if config.TotalRequests < 0 {
-		return fmt.Errorf("total_requests must be >= 0")
+	if config.DurationSeconds <= 0 {
+		return fmt.Errorf("duration_seconds must be > 0")
+	}
+	if config.WarmupSeconds < 0 {
+		return fmt.Errorf("warmup_seconds must be >= 0")
 	}
 	if config.Concurrency <= 0 {
 		return fmt.Errorf("concurrency must be > 0")
@@ -134,14 +149,14 @@ func (config Config) validate() error {
 	if config.ChunksPerResponse <= 0 {
 		return fmt.Errorf("chunks_per_response must be > 0")
 	}
-	if config.ChunkBytes < 0 {
-		return fmt.Errorf("chunk_bytes must be >= 0")
+	if config.ChunkBytes <= 0 {
+		return fmt.Errorf("chunk_bytes must be > 0")
 	}
-	if config.DelayUS < 0 {
-		return fmt.Errorf("delay_us must be >= 0")
+	if config.TTFCMS < 0 {
+		return fmt.Errorf("ttfc_ms must be >= 0")
 	}
-	if config.WarmupRequests < 0 {
-		return fmt.Errorf("warmup_requests must be >= 0")
+	if config.EventsPerSecond < 0 {
+		return fmt.Errorf("events_per_second must be >= 0")
 	}
 	return nil
 }
@@ -150,60 +165,95 @@ func (config Config) endpoint() string {
 	return strings.TrimRight(config.BaseURL, "/") + "/v1/chat/completions"
 }
 
-func (config Config) requestPayload(index int, language string) map[string]any {
+func (config Config) requestPayload(workerIndex int, sequence int, language string) map[string]any {
 	return map[string]any{
-		"model":       "synthetic",
-		"messages":    []map[string]string{{"role": "user", "content": "benchmark"}},
-		"stream":      true,
-		"chunks":      config.ChunksPerResponse,
-		"chunk_bytes": config.ChunkBytes,
-		"delay_us":    config.DelayUS,
-		"request_id":  fmt.Sprintf("%s-%d", language, index),
+		"model":             "synthetic",
+		"messages":          []map[string]string{{"role": "user", "content": "benchmark"}},
+		"stream":            true,
+		"chunks":            config.ChunksPerResponse,
+		"chunk_bytes":       config.ChunkBytes,
+		"ttfc_ms":           config.TTFCMS,
+		"events_per_second": config.EventsPerSecond,
+		"request_id":        fmt.Sprintf("%s-%d-%d", language, workerIndex, sequence),
 	}
 }
 
-func runOneRequest(client *http.Client, config Config, index int) Measurement {
+func runOneRequest(client *http.Client, config Config, workerIndex int, sequence int) Measurement {
 	started := time.Now()
-	body, err := json.Marshal(config.requestPayload(index, "go"))
+	var firstEventAt, previousEventAt, lastEventAt time.Time
+	maxGapMS := 0.0
+	chunks := 0
+	contentBytes := 0
+	sawDone := false
+
+	observe := func() {
+		now := time.Now()
+		if firstEventAt.IsZero() {
+			firstEventAt = now
+		}
+		if !previousEventAt.IsZero() {
+			gap := float64(now.Sub(previousEventAt).Microseconds()) / 1000.0
+			if gap > maxGapMS {
+				maxGapMS = gap
+			}
+		}
+		previousEventAt = now
+		lastEventAt = now
+	}
+
+	build := func(ok bool) Measurement {
+		firstChunkMS := 0.0
+		if !firstEventAt.IsZero() {
+			firstChunkMS = float64(firstEventAt.Sub(started).Microseconds()) / 1000.0
+		}
+		streamMS := 0.0
+		if !firstEventAt.IsZero() && !lastEventAt.IsZero() {
+			streamMS = float64(lastEventAt.Sub(firstEventAt).Microseconds()) / 1000.0
+		}
+		return Measurement{
+			OK:           ok,
+			LatencyMS:    float64(time.Since(started).Microseconds()) / 1000.0,
+			FirstChunkMS: firstChunkMS,
+			Chunks:       chunks,
+			Bytes:        contentBytes,
+			MaxGapMS:     maxGapMS,
+			StreamMS:     streamMS,
+		}
+	}
+
+	body, err := json.Marshal(config.requestPayload(workerIndex, sequence, "go"))
 	if err != nil {
-		return failedMeasurement(started, 0, 0, 0)
+		return build(false)
 	}
 
 	request, err := http.NewRequest(http.MethodPost, config.endpoint(), bytes.NewReader(body))
 	if err != nil {
-		return failedMeasurement(started, 0, 0, 0)
+		return build(false)
 	}
 	request.Header.Set("content-type", "application/json")
 
 	response, err := client.Do(request)
 	if err != nil {
-		return failedMeasurement(started, 0, 0, 0)
+		return build(false)
 	}
 	defer response.Body.Close()
 
 	if response.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, response.Body)
-		return failedMeasurement(started, 0, 0, 0)
+		return build(false)
 	}
 
 	reader := bufio.NewReader(response.Body)
 	decoder := newSSEDecoder()
-	firstChunkMS := 0.0
-	chunks := 0
-	contentBytes := 0
-	sawDone := false
 
 	for {
 		piece, readErr := reader.ReadString('\n')
 		if len(piece) > 0 {
 			for _, event := range decoder.feed(piece) {
+				observe()
 				if event == "[DONE]" {
 					sawDone = true
 					continue
-				}
-
-				if chunks == 0 {
-					firstChunkMS = float64(time.Since(started).Microseconds()) / 1000.0
 				}
 
 				var payload struct {
@@ -214,14 +264,16 @@ func runOneRequest(client *http.Client, config Config, index int) Measurement {
 					} `json:"choices"`
 				}
 				if err := json.Unmarshal([]byte(event), &payload); err != nil {
-					return failedMeasurement(started, firstChunkMS, chunks, contentBytes)
+					return build(false)
 				}
 				if len(payload.Choices) == 0 {
-					return failedMeasurement(started, firstChunkMS, chunks, contentBytes)
+					return build(false)
 				}
 				content := payload.Choices[0].Delta.Content
-				chunks++
-				contentBytes += len([]byte(content))
+				if content != "" {
+					chunks++
+					contentBytes += len(content)
+				}
 			}
 		}
 
@@ -229,94 +281,106 @@ func runOneRequest(client *http.Client, config Config, index int) Measurement {
 			break
 		}
 		if readErr != nil {
-			return failedMeasurement(started, firstChunkMS, chunks, contentBytes)
+			return build(false)
 		}
 	}
 
-	return Measurement{
-		OK:           sawDone,
-		LatencyMS:    float64(time.Since(started).Microseconds()) / 1000.0,
-		FirstChunkMS: firstChunkMS,
-		Chunks:       chunks,
-		Bytes:        contentBytes,
-	}
+	return build(sawDone)
 }
 
-func failedMeasurement(started time.Time, firstChunkMS float64, chunks int, contentBytes int) Measurement {
-	return Measurement{
-		OK:           false,
-		LatencyMS:    float64(time.Since(started).Microseconds()) / 1000.0,
-		FirstChunkMS: firstChunkMS,
-		Chunks:       chunks,
-		Bytes:        contentBytes,
+func runFor(config Config, seconds float64, client *http.Client) ([]Measurement, float64) {
+	if seconds <= 0 {
+		return nil, 0
 	}
-}
+	started := time.Now()
+	deadline := started.Add(time.Duration(seconds * float64(time.Second)))
 
-func runMany(config Config, totalRequests int, client *http.Client) []Measurement {
-	if totalRequests == 0 {
-		return []Measurement{}
-	}
-
-	workerCount := config.Concurrency
-	if workerCount > totalRequests {
-		workerCount = totalRequests
-	}
-
-	jobs := make(chan int)
-	results := make(chan Measurement, totalRequests)
+	var mu sync.Mutex
+	measurements := []Measurement{}
 	var wg sync.WaitGroup
 
-	for worker := 0; worker < workerCount; worker++ {
+	for worker := 0; worker < config.Concurrency; worker++ {
 		wg.Add(1)
-		go func() {
+		go func(workerIndex int) {
 			defer wg.Done()
-			for index := range jobs {
-				results <- runOneRequest(client, config, index)
+			for sequence := 0; time.Now().Before(deadline); sequence++ {
+				measurement := runOneRequest(client, config, workerIndex, sequence)
+				mu.Lock()
+				measurements = append(measurements, measurement)
+				mu.Unlock()
 			}
-		}()
+		}(worker)
 	}
 
-	for index := 0; index < totalRequests; index++ {
-		jobs <- index
-	}
-	close(jobs)
 	wg.Wait()
-	close(results)
-
-	measurements := make([]Measurement, 0, totalRequests)
-	for measurement := range results {
-		measurements = append(measurements, measurement)
-	}
-	return measurements
+	return measurements, float64(time.Since(started).Microseconds()) / 1000.0
 }
 
-func aggregateSummary(measurements []Measurement, durationMS float64) Summary {
-	successful := []Measurement{}
-	failed := 0
+func aggregateSummary(measurements []Measurement, durationMS float64, config Config) Summary {
+	expected := config.ChunksPerResponse
 	latencies := []float64{}
 	firstChunks := []float64{}
+	maxGaps := []float64{}
+	stretches := []float64{}
+	successful := 0
+	incomplete := 0
+	failed := 0
 	totalChunks := 0
 	totalBytes := 0
 
+	idealStreamMS := 0.0
+	if config.EventsPerSecond > 0 && expected > 1 {
+		idealStreamMS = float64(expected-1) / float64(config.EventsPerSecond) * 1000.0
+	}
+
 	for _, measurement := range measurements {
-		if measurement.OK {
-			successful = append(successful, measurement)
-			latencies = append(latencies, measurement.LatencyMS)
-			firstChunks = append(firstChunks, measurement.FirstChunkMS)
-			totalChunks += measurement.Chunks
-			totalBytes += measurement.Bytes
-		} else {
+		if !measurement.OK {
 			failed++
+			continue
 		}
+		if measurement.Chunks != expected {
+			incomplete++
+			continue
+		}
+		successful++
+		latencies = append(latencies, measurement.LatencyMS)
+		firstChunks = append(firstChunks, measurement.FirstChunkMS)
+		maxGaps = append(maxGaps, measurement.MaxGapMS)
+		if idealStreamMS > 0 {
+			stretches = append(stretches, measurement.StreamMS/idealStreamMS)
+		}
+		totalChunks += measurement.Chunks
+		totalBytes += measurement.Bytes
 	}
 
 	durationSeconds := durationMS / 1000.0
-	summary := Summary{
+	chunksPerSecond := 0.0
+	requestsPerSecond := 0.0
+	if durationSeconds > 0 {
+		chunksPerSecond = float64(totalChunks) / durationSeconds
+		requestsPerSecond = float64(successful) / durationSeconds
+	}
+	idealEventsPerSecond := float64(config.EventsPerSecond * config.Concurrency)
+	efficiency := 0.0
+	if idealEventsPerSecond > 0 {
+		efficiency = chunksPerSecond / idealEventsPerSecond
+	}
+	maxMaxGap := 0.0
+	for _, gap := range maxGaps {
+		if gap > maxMaxGap {
+			maxMaxGap = gap
+		}
+	}
+
+	return Summary{
 		DurationMS:             durationMS,
-		SuccessfulRequests:     len(successful),
+		SuccessfulRequests:     successful,
+		IncompleteRequests:     incomplete,
 		FailedRequests:         failed,
 		TotalChunks:            totalChunks,
 		TotalBytes:             totalBytes,
+		RequestsPerSecond:      requestsPerSecond,
+		ChunksPerSecond:        chunksPerSecond,
 		MeanRequestLatencyMS:   mean(latencies),
 		P50RequestLatencyMS:    percentile(latencies, 0.50),
 		P95RequestLatencyMS:    percentile(latencies, 0.95),
@@ -325,16 +389,16 @@ func aggregateSummary(measurements []Measurement, durationMS float64) Summary {
 		P50TimeToFirstChunkMS:  percentile(firstChunks, 0.50),
 		P95TimeToFirstChunkMS:  percentile(firstChunks, 0.95),
 		P99TimeToFirstChunkMS:  percentile(firstChunks, 0.99),
+		P50MaxGapMS:            percentile(maxGaps, 0.50),
+		P95MaxGapMS:            percentile(maxGaps, 0.95),
+		P99MaxGapMS:            percentile(maxGaps, 0.99),
+		MaxMaxGapMS:            maxMaxGap,
+		P50StreamStretch:       percentile(stretches, 0.50),
+		P95StreamStretch:       percentile(stretches, 0.95),
+		P99StreamStretch:       percentile(stretches, 0.99),
+		IdealEventsPerSecond:   idealEventsPerSecond,
+		Efficiency:             efficiency,
 	}
-	if durationSeconds > 0 {
-		summary.RequestsPerSecond = float64(len(successful)) / durationSeconds
-		summary.ChunksPerSecond = float64(totalChunks) / durationSeconds
-	}
-	if totalChunks > 0 {
-		summary.PerChunkOverheadMS = durationMS / float64(totalChunks)
-	}
-
-	return summary
 }
 
 func percentile(values []float64, rank float64) float64 {
@@ -367,23 +431,25 @@ func mean(values []float64) float64 {
 }
 
 func runBenchmark(config Config, outputDir string) (Result, error) {
-	client := &http.Client{Timeout: 0}
+	transport := &http.Transport{
+		MaxIdleConns:        config.Concurrency,
+		MaxIdleConnsPerHost: config.Concurrency,
+	}
+	client := &http.Client{Transport: transport}
 	startedAt := time.Now().UTC()
 
-	if config.WarmupRequests > 0 {
-		_ = runMany(config, config.WarmupRequests, client)
+	if config.WarmupSeconds > 0 {
+		_, _ = runFor(config, config.WarmupSeconds, client)
 	}
 
-	measuredStart := time.Now()
-	measurements := runMany(config, config.TotalRequests, client)
-	durationMS := float64(time.Since(measuredStart).Microseconds()) / 1000.0
+	measurements, durationMS := runFor(config, config.DurationSeconds, client)
 
 	result := Result{
 		Language:       "go",
 		Implementation: "net-http-goroutines",
 		StartedAt:      startedAt.Format(time.RFC3339Nano),
 		Config:         config,
-		Summary:        aggregateSummary(measurements, durationMS),
+		Summary:        aggregateSummary(measurements, durationMS, config),
 	}
 
 	destination := outputDir
@@ -424,9 +490,11 @@ func main() {
 	}
 
 	fmt.Printf(
-		"go requests/s=%.2f chunks/s=%.2f failures=%d\n",
+		"go requests/s=%.2f chunks/s=%.2f efficiency=%.3f failures=%d incomplete=%d\n",
 		result.Summary.RequestsPerSecond,
 		result.Summary.ChunksPerSecond,
+		result.Summary.Efficiency,
 		result.Summary.FailedRequests,
+		result.Summary.IncompleteRequests,
 	)
 }
