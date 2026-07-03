@@ -103,6 +103,59 @@ def stop_reason(sweep: SweepConfig, tier: SweepTier, summaries: list[dict[str, A
     return None
 
 
+def format_duration(seconds: float) -> str:
+    total = int(seconds)
+    if total < 60:
+        return f"{total}s"
+    if total < 3600:
+        return f"{total // 60}m{total % 60:02d}s"
+    return f"{total // 3600}h{(total % 3600) // 60:02d}m"
+
+
+class SweepProgress:
+    """Tracks completed vs planned client-runs so the console shows how far
+    through the sweep we are. Stop rules prune the plan as clients drop out,
+    so the denominator shrinks instead of the percentage stalling."""
+
+    def __init__(self, sweep: SweepConfig) -> None:
+        self._rungs = len(sweep.concurrencies)
+        self._repeats = sweep.repeats
+        self.total = len(sweep.tiers) * self._rungs * self._repeats * len(sweep.clients)
+        self.completed = 0
+        self._durations: list[float] = []
+        self._started = time.monotonic()
+
+    def finish_run(self, duration_seconds: float) -> None:
+        self.completed += 1
+        self._durations.append(duration_seconds)
+
+    def drop_client(self, rung_index: int) -> int:
+        """A client stopped at this rung: its runs on later rungs won't happen."""
+        removed = (self._rungs - rung_index - 1) * self._repeats
+        self.total -= removed
+        return removed
+
+    def percent(self) -> float:
+        return 100.0 * self.completed / self.total if self.total else 100.0
+
+    def eta_seconds(self) -> float | None:
+        if not self._durations:
+            return None
+        mean_duration = sum(self._durations) / len(self._durations)
+        return mean_duration * (self.total - self.completed)
+
+    def elapsed_seconds(self) -> float:
+        return time.monotonic() - self._started
+
+    def status(self) -> str:
+        eta = self.eta_seconds()
+        eta_text = f", ~{format_duration(eta)} left" if eta is not None else ""
+        return (
+            f"{self.completed}/{self.total} runs ({self.percent():.0f}%), "
+            f"elapsed {format_duration(self.elapsed_seconds())}{eta_text}"
+        )
+
+
 class CpuSampler:
     """Samples %CPU for named pids via `ps` on a background thread."""
 
@@ -233,7 +286,7 @@ def run_cell_client(
         print(f"warning: failed to reset server stats before {client_name}: {error}", file=sys.stderr)
 
     command = client_command(client_name, binaries, config_path, out_dir)
-    print("+", " ".join(command))
+    print("  +", " ".join(command))
     process = subprocess.Popen(command, cwd=ROOT)
     sampler = CpuSampler({"server": server_pid, "client": process.pid}).start()
 
@@ -322,25 +375,58 @@ def main() -> int:
         "stops": {},
         "cells": [],
     }
+    progress = SweepProgress(sweep)
+    print(
+        f"sweep plan: {len(sweep.tiers)} tiers x {len(sweep.concurrencies)} concurrencies "
+        f"x {sweep.repeats} repeats x {len(sweep.clients)} clients "
+        f"= {progress.total} client-runs -> {run_dir}",
+        flush=True,
+    )
     try:
         wait_for_health(f"{sweep.base_url}/health")
 
-        for tier in sweep.tiers:
+        for tier_index, tier in enumerate(sweep.tiers):
             active = list(sweep.clients)
-            for concurrency in sweep.concurrencies:
+            for rung_index, concurrency in enumerate(sweep.concurrencies):
                 if not active:
                     break
                 workload = build_workload(sweep, tier, concurrency)
                 config_path = run_dir / "configs" / f"{tier.name}-c{concurrency}.json"
                 config_path.write_text(json.dumps(workload, indent=2) + "\n")
 
+                print(
+                    f"\n=== {tier.name} c={concurrency} "
+                    f"(tier {tier_index + 1}/{len(sweep.tiers)}, "
+                    f"rung {rung_index + 1}/{len(sweep.concurrencies)}) "
+                    f"active: {', '.join(active)}",
+                    flush=True,
+                )
+
                 cell_summaries: dict[str, list[dict[str, Any]]] = {name: [] for name in active}
                 for repeat in range(sweep.repeats):
                     for client_name in rotated(tuple(active), repeat):
+                        run_label = (
+                            f"[{progress.completed + 1}/{progress.total}] "
+                            f"{tier.name} c={concurrency} r{repeat} {client_name}"
+                        )
+                        print(run_label, flush=True)
+                        run_started = time.monotonic()
                         out_dir = run_dir / tier.name / f"c{concurrency}" / f"r{repeat}" / client_name
                         result = run_cell_client(
                             sweep, binaries, server.pid, client_name, config_path, out_dir
                         )
+                        run_seconds = time.monotonic() - run_started
+                        progress.finish_run(run_seconds)
+                        if result is not None:
+                            summary = result["summary"]
+                            outcome = (
+                                f"efficiency={summary['efficiency']:.3f} "
+                                f"failed={summary['failed_requests']} "
+                                f"incomplete={summary['incomplete_requests']}"
+                            )
+                        else:
+                            outcome = "FAILED (no summary)"
+                        print(f"{run_label} done in {run_seconds:.1f}s · {outcome}", flush=True)
                         record["cells"].append({
                             "tier": tier.name,
                             "concurrency": concurrency,
@@ -359,9 +445,15 @@ def main() -> int:
                             "concurrency": concurrency,
                             "reason": reason,
                         }
-                        print(f"stop {tier.name}/{client_name} at c={concurrency}: {reason}")
+                        pruned = progress.drop_client(rung_index)
+                        print(
+                            f"stop {tier.name}/{client_name} at c={concurrency}: {reason} "
+                            f"({pruned} runs pruned)",
+                            flush=True,
+                        )
 
                 write_sweep_record(run_dir, record)
+                print(f"progress: {progress.status()}", flush=True)
 
                 if sweep.cooldown_seconds > 0:
                     time.sleep(sweep.cooldown_seconds)
@@ -375,6 +467,11 @@ def main() -> int:
         record["finished_at"] = datetime.now(timezone.utc).isoformat()
         write_sweep_record(run_dir, record)
 
+    print(
+        f"\nsweep complete: {progress.completed}/{progress.total} runs "
+        f"in {format_duration(progress.elapsed_seconds())}, "
+        f"{len(record['stops'])} stop(s)"
+    )
     print(run_dir)
     return 0
 

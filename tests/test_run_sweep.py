@@ -6,8 +6,10 @@ from unittest.mock import patch
 
 from scripts.run_sweep import (
     SweepConfig,
+    SweepProgress,
     SweepTier,
     build_workload,
+    format_duration,
     python_client_ready,
     rotated,
     stop_reason,
@@ -116,6 +118,44 @@ class StopReasonTests(unittest.TestCase):
     def test_no_summaries_triggers_stop(self):
         sweep = sweep_config()
         self.assertIsNotNone(stop_reason(sweep, sweep.tiers[0], []))
+
+
+class SweepProgressTests(unittest.TestCase):
+    def test_total_counts_full_grid(self):
+        # 1 tier x 2 concurrencies x 2 repeats x 2 clients = 8 client-runs
+        progress = SweepProgress(sweep_config())
+        self.assertEqual(progress.total, 8)
+        self.assertEqual(progress.completed, 0)
+
+    def test_drop_client_prunes_remaining_rungs(self):
+        progress = SweepProgress(sweep_config())
+        # stopped at rung index 0 of 2 -> loses 1 remaining rung x 2 repeats
+        removed = progress.drop_client(rung_index=0)
+        self.assertEqual(removed, 2)
+        self.assertEqual(progress.total, 6)
+        # stopped at the last rung -> nothing left to prune
+        self.assertEqual(progress.drop_client(rung_index=1), 0)
+
+    def test_eta_uses_mean_run_duration(self):
+        progress = SweepProgress(sweep_config())
+        self.assertIsNone(progress.eta_seconds())
+        progress.finish_run(10.0)
+        progress.finish_run(20.0)
+        # mean 15s x 6 remaining runs
+        self.assertAlmostEqual(progress.eta_seconds(), 90.0)
+
+    def test_percent_complete(self):
+        progress = SweepProgress(sweep_config())
+        progress.finish_run(1.0)
+        progress.finish_run(1.0)
+        self.assertAlmostEqual(progress.percent(), 25.0)
+
+
+class FormatDurationTests(unittest.TestCase):
+    def test_seconds_minutes_hours(self):
+        self.assertEqual(format_duration(45), "45s")
+        self.assertEqual(format_duration(125), "2m05s")
+        self.assertEqual(format_duration(3900), "1h05m")
 
 
 class PythonClientReadyTests(unittest.TestCase):
