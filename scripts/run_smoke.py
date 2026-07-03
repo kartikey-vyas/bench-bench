@@ -103,7 +103,7 @@ def run_clients(config: Path, run_dir: Path) -> int:
         print("skip go client: go is not installed")
 
     if require_tool("cargo"):
-        for client_name in ("reqwest", "hyper"):
+        for client_name in ("reqwest", "hyper", "drain"):
             failures += run_command(
                 [
                     "cargo",
