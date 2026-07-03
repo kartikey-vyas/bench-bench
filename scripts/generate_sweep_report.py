@@ -393,6 +393,29 @@ thead th {{ color: var(--ink-2); font-size: 12px; text-transform: uppercase;
 """
 
 
+def normalize_run_dirs(run_dirs: Path | list[Path]) -> list[Path]:
+    return [run_dirs] if isinstance(run_dirs, Path) else list(run_dirs)
+
+
+def load_merged(run_dirs: list[Path]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Merge cells and sweep metadata from one or more run directories.
+    Stops are unioned; the config is kept only when every run agrees, so the
+    scope line never claims a duration that only some cells used."""
+    cells: list[dict[str, Any]] = []
+    stops: dict[str, Any] = {}
+    configs: list[dict[str, Any]] = []
+    for run_dir in run_dirs:
+        cells.extend(load_cells(run_dir))
+        meta = load_json_if_exists(run_dir / "sweep.json")
+        stops.update(meta.get("stops", {}))
+        if meta.get("config"):
+            configs.append(meta["config"])
+    merged: dict[str, Any] = {"stops": stops}
+    if configs and all(c == configs[0] for c in configs):
+        merged["config"] = configs[0]
+    return cells, merged
+
+
 def describe_scope(cells: list[dict[str, Any]], sweep_meta: dict[str, Any]) -> str:
     """One header line saying how big this run actually was, so a smoke run
     can never be mistaken for a full sweep."""
@@ -419,9 +442,12 @@ def describe_scope(cells: list[dict[str, Any]], sweep_meta: dict[str, Any]) -> s
     return f'<p class="scope">{escape(scope)}</p>'
 
 
-def render_report(run_dir: Path, cells: list[dict[str, Any]], sweep_meta: dict[str, Any]) -> str:
+def render_report(
+    run_dirs: Path | list[Path], cells: list[dict[str, Any]], sweep_meta: dict[str, Any]
+) -> str:
     if not cells:
         raise ValueError("Cannot render sweep report without cells")
+    run_label = " + ".join(str(d) for d in normalize_run_dirs(run_dirs))
     aggregates = aggregate_cells(cells)
     tiers = sorted({tier for (tier, _, _) in aggregates})
     # Paced tiers ordered by rate, then the unpaced tier(s) last.
@@ -446,7 +472,7 @@ def render_report(run_dir: Path, cells: list[dict[str, Any]], sweep_meta: dict[s
 <header>
   <p class="eyebrow">Concurrency sweep — synthetic OpenAI-style streaming</p>
   <h1>Streaming Client Sweep Report</h1>
-  <p>Run: {escape(str(run_dir))} · Generated: {escape(generated_at)}</p>
+  <p>Run: {escape(run_label)} · Generated: {escape(generated_at)}</p>
   {describe_scope(cells, sweep_meta)}
   <p>Efficiency = observed parsed events/sec ÷ the achievable closed-loop ideal
   (concurrency × chunks ÷ (TTFC + (chunks−1)/rate)).
@@ -461,25 +487,31 @@ def render_report(run_dir: Path, cells: list[dict[str, Any]], sweep_meta: dict[s
 """
 
 
-def write_report(run_dir: Path, output: Path) -> Path:
-    cells = load_cells(run_dir)
+def write_report(run_dirs: Path | list[Path], output: Path) -> Path:
+    dirs = normalize_run_dirs(run_dirs)
+    cells, sweep_meta = load_merged(dirs)
     if not cells:
-        raise FileNotFoundError(f"No cell summary.json files found under {run_dir}")
-    sweep_meta = load_json_if_exists(run_dir / "sweep.json")
+        raise FileNotFoundError(
+            f"No cell summary.json files found under {', '.join(str(d) for d in dirs)}"
+        )
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(render_report(run_dir, cells, sweep_meta))
+    output.write_text(render_report(dirs, cells, sweep_meta))
     return output
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Generate a static HTML sweep report.")
-    parser.add_argument("results_dir", nargs="?", default=None,
-                        help="Sweep run directory. Defaults to newest under results/.")
+    parser.add_argument("results_dirs", nargs="*", default=None,
+                        help="One or more sweep run directories (cells are merged). "
+                             "Defaults to newest under results/.")
     parser.add_argument("--output", default="reports/sweep/index.html", help="Output HTML path.")
     args = parser.parse_args()
 
-    results_dir = Path(args.results_dir) if args.results_dir else find_latest_results_dir(Path("results"))
-    output = write_report(results_dir, Path(args.output))
+    if args.results_dirs:
+        dirs = [Path(d) for d in args.results_dirs]
+    else:
+        dirs = [find_latest_results_dir(Path("results"))]
+    output = write_report(dirs, Path(args.output))
     print(output)
     return 0
 

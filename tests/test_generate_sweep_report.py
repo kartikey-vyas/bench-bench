@@ -99,6 +99,27 @@ class SweepReportTests(unittest.TestCase):
         self.assertIn("efficiency 0.5 below 0.9", html)  # knee table
         self.assertIn("<table", html)                # relief rule: table view
 
+    def test_write_report_merges_multiple_run_dirs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_a = Path(tmpdir) / "run-a"
+            run_b = Path(tmpdir) / "run-b"
+            write_cell(run_a, "eps500", 4, 0, "go", 0.99)
+            (run_a / "sweep.json").write_text(json.dumps({
+                "stops": {"eps500:go": {"concurrency": 4, "reason": "reason-a"}},
+            }))
+            write_cell(run_b, "eps500", 16, 0, "python", 0.95)
+            (run_b / "sweep.json").write_text(json.dumps({
+                "stops": {"eps500:python": {"concurrency": 16, "reason": "reason-b"}},
+            }))
+
+            output = Path(tmpdir) / "report" / "index.html"
+            html = write_report([run_a, run_b], output).read_text()
+
+        self.assertIn("run-a + ", html)          # both dirs named in the header
+        self.assertIn("reason-a", html)          # stops unioned
+        self.assertIn("reason-b", html)
+        self.assertIn(">16<", html)              # cells from both runs present
+
     def test_direct_labels_do_not_collide(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir) / "run"
