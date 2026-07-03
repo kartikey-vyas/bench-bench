@@ -1,10 +1,11 @@
 {
   "base_url": "http://127.0.0.1:8080",
-  "total_requests": 5000,
+  "duration_seconds": 15.0,
+  "warmup_seconds": 3.0,
   "concurrency": 64,
   "chunks_per_response": 512,
-  "chunk_bytes": 32,
-  "delay_us": 0,
-  "warmup_requests": 500,
+  "chunk_bytes": 8,
+  "ttfc_ms": 0,
+  "events_per_second": 0,
   "output_dir": "results"
 }
