@@ -515,10 +515,17 @@ pub fn build_client(kind: ClientKind) -> Result<AnyClient, Box<dyn Error + Send 
     Ok(match kind {
         ClientKind::Reqwest => AnyClient::Reqwest(reqwest::Client::builder().build()?),
         ClientKind::Hyper => {
-            AnyClient::Hyper(HyperClient::builder(TokioExecutor::new()).build_http())
+            // hyper-util's HttpConnector defaults nodelay=false, while Go/reqwest
+            // default true; without this the hyper (and drain, the reference)
+            // clients would be skewed relative to the others.
+            let mut connector = HttpConnector::new();
+            connector.set_nodelay(true);
+            AnyClient::Hyper(HyperClient::builder(TokioExecutor::new()).build(connector))
         }
         ClientKind::Drain => {
-            AnyClient::Drain(HyperClient::builder(TokioExecutor::new()).build_http())
+            let mut connector = HttpConnector::new();
+            connector.set_nodelay(true);
+            AnyClient::Drain(HyperClient::builder(TokioExecutor::new()).build(connector))
         }
     })
 }

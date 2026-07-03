@@ -176,7 +176,7 @@ impl ServerStats {
     }
 
     /// Record one emitted batch: how many events it carried and how late the
-    /// newest event in it was relative to its deadline.
+    /// oldest event in it was relative to its deadline.
     pub fn record_batch(&self, events: u64, slip: Duration) {
         self.events_emitted.fetch_add(events, Ordering::Relaxed);
         let slip_us = u64::try_from(slip.as_micros()).unwrap_or(u64::MAX);
@@ -298,9 +298,12 @@ async fn chat_completions(
             };
 
             if due > sent {
+                // Slip is lateness of the oldest unsent event in the batch (not the
+                // newest), so a stalled wakeup shows its true lateness instead of
+                // being bounded below one pacing interval by construction.
                 let batch_deadline = match plan.interval {
                     None => first_due,
-                    Some(interval) => first_due + interval.mul_f64((due - 1) as f64),
+                    Some(interval) => first_due + interval.mul_f64(sent as f64),
                 };
                 let slip = Instant::now().duration_since(batch_deadline);
                 stats.record_batch((due - sent) as u64, slip);

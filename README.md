@@ -201,3 +201,8 @@ ceiling. If drain holds efficiency ≈ 1.0 at a concurrency where a real client
 does not, the gap is client overhead, not the server. Cross-check
 `server_stats.json` (schedule slip) and `cpu.json` per cell before attributing
 a knee to the client — on one machine, a saturated client can starve the server.
+
+- Closed-loop cells quantize at low event rates: with long streams and short
+  windows each worker completes only a few requests, and the tail (waiting
+  for the last in-flight request) slightly deflates aggregate events/sec.
+  Prefer longer `duration_seconds` for low-rate tiers.

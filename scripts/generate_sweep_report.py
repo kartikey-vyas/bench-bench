@@ -420,7 +420,8 @@ def render_report(run_dir: Path, cells: list[dict[str, Any]], sweep_meta: dict[s
   <p class="eyebrow">Concurrency sweep — synthetic OpenAI-style streaming</p>
   <h1>Streaming Client Sweep Report</h1>
   <p>Run: {escape(str(run_dir))} · Generated: {escape(generated_at)}</p>
-  <p>Efficiency = observed parsed events/sec ÷ (events_per_second × concurrency).
+  <p>Efficiency = observed parsed events/sec ÷ the achievable closed-loop ideal
+  (concurrency × chunks ÷ (TTFC + (chunks−1)/rate)).
   The drain client is a parse-free reference: any gap it shows is server/OS,
   any gap below it is client overhead.</p>
 </header>

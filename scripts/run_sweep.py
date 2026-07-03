@@ -227,7 +227,10 @@ def run_cell_client(
     out_dir: Path,
 ) -> dict[str, Any] | None:
     out_dir.mkdir(parents=True, exist_ok=True)
-    http_post(f"{sweep.base_url}/stats/reset")
+    try:
+        http_post(f"{sweep.base_url}/stats/reset")
+    except OSError as error:
+        print(f"warning: failed to reset server stats before {client_name}: {error}", file=sys.stderr)
 
     command = client_command(client_name, binaries, config_path, out_dir)
     print("+", " ".join(command))
@@ -240,7 +243,10 @@ def run_cell_client(
         returncode = process.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         process.kill()
-        process.wait(timeout=5)
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            print(f"warning: {client_name} did not reap after kill, continuing", file=sys.stderr)
         print(f"warning: {client_name} timed out after {timeout:.0f}s, killed", file=sys.stderr)
         timed_out = True
         returncode = None
@@ -249,7 +255,11 @@ def run_cell_client(
         raise
 
     cpu = sampler.stop()
-    server_stats = http_get_json(f"{sweep.base_url}/stats")
+    try:
+        server_stats = http_get_json(f"{sweep.base_url}/stats")
+    except OSError as error:
+        print(f"warning: failed to fetch server stats after {client_name}: {error}", file=sys.stderr)
+        server_stats = {}
 
     (out_dir / "server_stats.json").write_text(json.dumps(server_stats, indent=2) + "\n")
     (out_dir / "cpu.json").write_text(json.dumps(cpu, indent=2) + "\n")
