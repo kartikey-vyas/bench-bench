@@ -13,90 +13,122 @@ from bench_harness.metrics import RequestMeasurement, aggregate_summary
 from bench_harness.sse import SseDecoder
 
 
-async def run_one_request(client: Any, config: WorkloadConfig, request_index: int) -> RequestMeasurement:
+async def run_one_request(
+    client: Any, config: WorkloadConfig, worker_index: int, sequence: int
+) -> RequestMeasurement:
     started = time.perf_counter()
-    first_chunk_ms = 0.0
+    first_event_at: float | None = None
+    previous_event_at: float | None = None
+    last_event_at: float | None = None
+    max_gap_ms = 0.0
     chunks = 0
     content_bytes = 0
     saw_done = False
 
-    try:
-        async with client.stream("POST", config.endpoint, json=config.request_payload(request_index, "python")) as response:
-            if response.status_code != 200:
-                await response.aread()
-                return RequestMeasurement(
-                    ok=False,
-                    latency_ms=(time.perf_counter() - started) * 1000.0,
-                    first_chunk_ms=0.0,
-                    chunks=0,
-                    bytes=0,
-                )
+    def observe_event() -> None:
+        nonlocal first_event_at, previous_event_at, last_event_at, max_gap_ms
+        now = time.perf_counter()
+        if first_event_at is None:
+            first_event_at = now
+        if previous_event_at is not None:
+            max_gap_ms = max(max_gap_ms, (now - previous_event_at) * 1000.0)
+        previous_event_at = now
+        last_event_at = now
 
-            decoder = SseDecoder()
-            async for text in response.aiter_text():
-                for event in decoder.feed(text):
-                    if event == "[DONE]":
-                        saw_done = True
-                        continue
-
-                    if chunks == 0:
-                        first_chunk_ms = (time.perf_counter() - started) * 1000.0
-
-                    payload = json.loads(event)
-                    content = payload["choices"][0]["delta"].get("content", "")
-                    chunks += 1
-                    content_bytes += len(content.encode("utf-8"))
-    except Exception:
+    def measurement(ok: bool) -> RequestMeasurement:
+        first_chunk_ms = (
+            (first_event_at - started) * 1000.0 if first_event_at is not None else 0.0
+        )
+        stream_ms = (
+            (last_event_at - first_event_at) * 1000.0
+            if first_event_at is not None and last_event_at is not None
+            else 0.0
+        )
         return RequestMeasurement(
-            ok=False,
+            ok=ok,
             latency_ms=(time.perf_counter() - started) * 1000.0,
             first_chunk_ms=first_chunk_ms,
             chunks=chunks,
             bytes=content_bytes,
+            max_gap_ms=max_gap_ms,
+            stream_ms=stream_ms,
         )
 
-    return RequestMeasurement(
-        ok=saw_done,
-        latency_ms=(time.perf_counter() - started) * 1000.0,
-        first_chunk_ms=first_chunk_ms,
-        chunks=chunks,
-        bytes=content_bytes,
-    )
+    try:
+        payload = config.request_payload(worker_index, sequence, "python")
+        async with client.stream("POST", config.endpoint, json=payload) as response:
+            if response.status_code != 200:
+                await response.aread()
+                return measurement(ok=False)
+
+            decoder = SseDecoder()
+            async for text in response.aiter_text():
+                for event in decoder.feed(text):
+                    observe_event()
+                    if event == "[DONE]":
+                        saw_done = True
+                        continue
+                    event_payload = json.loads(event)
+                    content = event_payload["choices"][0]["delta"].get("content") or ""
+                    if content:
+                        chunks += 1
+                        content_bytes += len(content.encode("utf-8"))
+    except Exception:
+        return measurement(ok=False)
+
+    return measurement(ok=saw_done)
 
 
-async def run_many(config: WorkloadConfig, total_requests: int, client: Any) -> list[RequestMeasurement]:
-    semaphore = asyncio.Semaphore(config.concurrency)
+async def run_for(
+    client: Any, config: WorkloadConfig, seconds: float
+) -> tuple[list[RequestMeasurement], float]:
+    measurements: list[RequestMeasurement] = []
+    started = time.perf_counter()
+    deadline = started + seconds
 
-    async def guarded_request(request_index: int) -> RequestMeasurement:
-        async with semaphore:
-            return await run_one_request(client, config, request_index)
+    async def worker(worker_index: int) -> None:
+        sequence = 0
+        while time.perf_counter() < deadline:
+            measurements.append(await run_one_request(client, config, worker_index, sequence))
+            sequence += 1
 
-    return await asyncio.gather(*(guarded_request(index) for index in range(total_requests)))
+    await asyncio.gather(*(worker(index) for index in range(config.concurrency)))
+    return measurements, (time.perf_counter() - started) * 1000.0
 
 
 async def run_benchmark(config: WorkloadConfig, output_dir: Path | None = None) -> dict[str, Any]:
     try:
         import httpx
     except ImportError as exc:
-        raise RuntimeError("Python client requires httpx. Install project dependencies with `uv sync`.") from exc
+        raise RuntimeError(
+            "Python client requires httpx. Install project dependencies with `uv sync`."
+        ) from exc
 
     started_at = datetime.now(timezone.utc)
     timeout = httpx.Timeout(connect=10.0, read=None, write=10.0, pool=None)
+    # The default pool caps at 100 connections, which would silently serialize
+    # higher concurrencies; size the pool to the workload.
+    limits = httpx.Limits(
+        max_connections=config.concurrency, max_keepalive_connections=config.concurrency
+    )
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        if config.warmup_requests:
-            await run_many(config, config.warmup_requests, client)
-
-        measured_start = time.perf_counter()
-        measurements = await run_many(config, config.total_requests, client)
-        duration_ms = (time.perf_counter() - measured_start) * 1000.0
+    async with httpx.AsyncClient(timeout=timeout, limits=limits) as client:
+        if config.warmup_seconds > 0:
+            await run_for(client, config, config.warmup_seconds)
+        measurements, duration_ms = await run_for(client, config, config.duration_seconds)
 
     result = {
         "language": "python",
         "implementation": "asyncio-httpx",
         "started_at": started_at.isoformat(),
         "config": config.result_config(),
-        "summary": aggregate_summary(measurements, duration_ms),
+        "summary": aggregate_summary(
+            measurements,
+            duration_ms,
+            expected_chunks=config.chunks_per_response,
+            events_per_second=config.events_per_second,
+            concurrency=config.concurrency,
+        ),
     }
 
     destination = output_dir or Path(config.output_dir) / "python"
@@ -118,7 +150,9 @@ async def async_main() -> None:
         "python "
         f"requests/s={summary['requests_per_second']:.2f} "
         f"chunks/s={summary['chunks_per_second']:.2f} "
-        f"failures={summary['failed_requests']}"
+        f"efficiency={summary['efficiency']:.3f} "
+        f"failures={summary['failed_requests']} "
+        f"incomplete={summary['incomplete_requests']}"
     )
 
 
