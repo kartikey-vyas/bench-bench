@@ -128,6 +128,7 @@ async def run_benchmark(config: WorkloadConfig, output_dir: Path | None = None) 
             expected_chunks=config.chunks_per_response,
             events_per_second=config.events_per_second,
             concurrency=config.concurrency,
+            ttfc_ms=config.ttfc_ms,
         ),
     }
 

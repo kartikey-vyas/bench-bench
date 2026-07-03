@@ -25,7 +25,7 @@ class MetricsTests(unittest.TestCase):
 
         summary = aggregate_summary(
             measurements, duration_ms=1000.0,
-            expected_chunks=4, events_per_second=100, concurrency=2,
+            expected_chunks=4, events_per_second=100, concurrency=2, ttfc_ms=0,
         )
 
         self.assertEqual(summary["successful_requests"], 1)
@@ -33,9 +33,9 @@ class MetricsTests(unittest.TestCase):
         self.assertEqual(summary["failed_requests"], 1)
         self.assertEqual(summary["total_chunks"], 4)
         self.assertEqual(summary["chunks_per_second"], 4.0)
-        # ideal = 100 eps * 2 workers = 200; efficiency = 4/200
-        self.assertEqual(summary["ideal_events_per_second"], 200.0)
-        self.assertAlmostEqual(summary["efficiency"], 0.02)
+        # ideal_request_seconds = 0 + 3/100 = 0.03; ideal = 2*4/0.03 = 266.6667
+        self.assertAlmostEqual(summary["ideal_events_per_second"], 266.6666666666667)
+        self.assertAlmostEqual(summary["efficiency"], 0.015)
         # ideal stream = (4-1)/100*1000 = 30ms; stretch = 30/30 = 1.0
         self.assertAlmostEqual(summary["p50_stream_stretch"], 1.0)
         self.assertEqual(summary["p95_max_gap_ms"], 12.0)
@@ -44,7 +44,7 @@ class MetricsTests(unittest.TestCase):
     def test_aggregate_summary_unpaced_has_zero_ideal_and_stretch(self):
         summary = aggregate_summary(
             [measurement()], duration_ms=1000.0,
-            expected_chunks=4, events_per_second=0, concurrency=2,
+            expected_chunks=4, events_per_second=0, concurrency=2, ttfc_ms=0,
         )
         self.assertEqual(summary["ideal_events_per_second"], 0.0)
         self.assertEqual(summary["efficiency"], 0.0)

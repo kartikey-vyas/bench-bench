@@ -655,7 +655,17 @@ pub fn aggregate_summary(measurements: &[Measurement], duration_ms: f64, config:
     } else {
         (0.0, 0.0)
     };
-    let ideal_events_per_second = (config.events_per_second as usize * config.concurrency) as f64;
+    let ideal_events_per_second = if config.events_per_second > 0 {
+        let ideal_request_seconds = config.ttfc_ms as f64 / 1000.0
+            + (expected - 1) as f64 / config.events_per_second as f64;
+        if ideal_request_seconds > 0.0 {
+            (config.concurrency * expected) as f64 / ideal_request_seconds
+        } else {
+            0.0
+        }
+    } else {
+        0.0
+    };
     let efficiency = if ideal_events_per_second > 0.0 {
         chunks_per_second / ideal_events_per_second
     } else {

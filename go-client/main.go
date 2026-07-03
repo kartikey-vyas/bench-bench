@@ -360,7 +360,13 @@ func aggregateSummary(measurements []Measurement, durationMS float64, config Con
 		chunksPerSecond = float64(totalChunks) / durationSeconds
 		requestsPerSecond = float64(successful) / durationSeconds
 	}
-	idealEventsPerSecond := float64(config.EventsPerSecond * config.Concurrency)
+	idealEventsPerSecond := 0.0
+	if config.EventsPerSecond > 0 {
+		idealRequestSeconds := float64(config.TTFCMS)/1000.0 + float64(expected-1)/float64(config.EventsPerSecond)
+		if idealRequestSeconds > 0 {
+			idealEventsPerSecond = float64(config.Concurrency*expected) / idealRequestSeconds
+		}
+	}
 	efficiency := 0.0
 	if idealEventsPerSecond > 0 {
 		efficiency = chunksPerSecond / idealEventsPerSecond

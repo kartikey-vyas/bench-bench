@@ -35,6 +35,7 @@ def aggregate_summary(
     expected_chunks: int,
     events_per_second: int,
     concurrency: int,
+    ttfc_ms: int,
 ) -> dict[str, float | int]:
     successful = [m for m in measurements if m.ok and m.chunks == expected_chunks]
     incomplete = [m for m in measurements if m.ok and m.chunks != expected_chunks]
@@ -57,7 +58,15 @@ def aggregate_summary(
     stretches = (
         [m.stream_ms / ideal_stream_ms for m in successful] if ideal_stream_ms > 0 else []
     )
-    ideal_events_per_second = float(events_per_second * concurrency)
+    if events_per_second > 0:
+        ideal_request_seconds = ttfc_ms / 1000.0 + (expected_chunks - 1) / events_per_second
+        ideal_events_per_second = (
+            concurrency * expected_chunks / ideal_request_seconds
+            if ideal_request_seconds > 0
+            else 0.0
+        )
+    else:
+        ideal_events_per_second = 0.0
     efficiency = (
         chunks_per_second / ideal_events_per_second if ideal_events_per_second > 0 else 0.0
     )

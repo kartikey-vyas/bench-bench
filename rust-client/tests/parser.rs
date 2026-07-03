@@ -95,8 +95,8 @@ fn aggregate_summary_classifies_and_computes_efficiency() {
     assert_eq!(summary.successful_requests, 1);
     assert_eq!(summary.incomplete_requests, 1);
     assert_eq!(summary.failed_requests, 1);
-    assert_eq!(summary.ideal_events_per_second, 200.0);
-    assert!((summary.efficiency - 0.02).abs() < 1e-9);
+    assert!((summary.ideal_events_per_second - 266.6666666666667).abs() < 1e-6);
+    assert!((summary.efficiency - 0.015).abs() < 1e-9);
     assert!((summary.p50_stream_stretch - 1.0).abs() < 1e-9);
     assert_eq!(summary.max_max_gap_ms, 12.0);
 }

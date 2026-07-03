@@ -65,12 +65,12 @@ func TestAggregateSummaryClassifiesAndComputesEfficiency(t *testing.T) {
 	if summary.FailedRequests != 1 {
 		t.Fatalf("failed = %d, want 1", summary.FailedRequests)
 	}
-	// chunks/s = 4; ideal = 100 * 2 = 200; efficiency = 0.02
-	if math.Abs(summary.IdealEventsPerSecond-200.0) > 1e-9 {
-		t.Fatalf("ideal = %v, want 200", summary.IdealEventsPerSecond)
+	// ideal_request_seconds = 0 + 3/100 = 0.03; ideal = 2*4/0.03 = 266.6667; efficiency = 4/266.6667 = 0.015
+	if math.Abs(summary.IdealEventsPerSecond-266.6666666666667) > 1e-6 {
+		t.Fatalf("ideal = %v, want 266.6666666666667", summary.IdealEventsPerSecond)
 	}
-	if math.Abs(summary.Efficiency-0.02) > 1e-9 {
-		t.Fatalf("efficiency = %v, want 0.02", summary.Efficiency)
+	if math.Abs(summary.Efficiency-0.015) > 1e-6 {
+		t.Fatalf("efficiency = %v, want 0.015", summary.Efficiency)
 	}
 	// ideal stream = (4-1)/100*1000 = 30ms; stretch = 30/30 = 1.0
 	if math.Abs(summary.P50StreamStretch-1.0) > 1e-9 {
