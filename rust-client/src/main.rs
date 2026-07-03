@@ -21,11 +21,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
     let result = run_benchmark_with_client(config, args.output_dir, client_kind).await?;
     println!(
-        "rust/{} requests/s={:.2} chunks/s={:.2} failures={}",
+        "rust/{} requests/s={:.2} chunks/s={:.2} efficiency={:.3} failures={} incomplete={}",
         result.implementation,
         result.summary.requests_per_second,
         result.summary.chunks_per_second,
-        result.summary.failed_requests
+        result.summary.efficiency,
+        result.summary.failed_requests,
+        result.summary.incomplete_requests
     );
     Ok(())
 }
