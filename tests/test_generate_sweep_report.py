@@ -99,6 +99,20 @@ class SweepReportTests(unittest.TestCase):
         self.assertIn("efficiency 0.5 below 0.9", html)  # knee table
         self.assertIn("<table", html)                # relief rule: table view
 
+    def test_dilution_suspect_flags_on_schedule_low_efficiency(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            # Low efficiency but perfect streams (fixture stretch 1.02, TTFC excess 10ms)
+            write_cell(root, "eps500", 256, 0, "drain", 0.80)
+            write_cell(root, "eps500", 4, 0, "go", 0.99)
+
+            groups = aggregate_cells(load_cells(root))
+            html = render_report(root, load_cells(root), {})
+
+        self.assertTrue(groups[("eps500", "drain", 256)]["dilution_suspect"])
+        self.assertFalse(groups[("eps500", "go", 4)]["dilution_suspect"])
+        self.assertIn("window dilution", html)
+
     def test_write_report_merges_multiple_run_dirs(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             run_a = Path(tmpdir) / "run-a"

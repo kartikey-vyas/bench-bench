@@ -95,6 +95,19 @@ def aggregate_cells(cells: list[dict[str, Any]]) -> dict[tuple[str, str, int], d
             "events_per_second": int(config.get("events_per_second", 0)),
             "ttfc_ms": ttfc_ms,
         }
+        entry = aggregates[key]
+        # Straggler dilution: one late worker stretches the closed-loop window
+        # while the rest idle, deflating aggregate efficiency even though every
+        # stream ran on schedule. Low efficiency with on-schedule streams and a
+        # clean TTFC tail is that artifact, not a client knee.
+        entry["dilution_suspect"] = bool(
+            entry["events_per_second"] > 0
+            and entry["efficiency_mean"] < 0.95
+            and entry["stretch_p95_mean"] < 1.05
+            and entry["ttfc_excess_p95_mean"] < 50.0
+            and entry["failed"] == 0
+            and entry["incomplete"] == 0
+        )
     return aggregates
 
 
@@ -285,12 +298,13 @@ def render_tier_section(aggregates: dict, tier: str) -> str:
                 f"<td>{format_number(entry['server_slip_p99_max'], 2)}</td>"
                 f"<td>{format_number(entry['client_cpu_mean'], 0)}%</td>"
                 f"<td>{format_number(entry['server_cpu_mean'], 0)}%</td>"
+                f'<td>{"<span class=\"flag\">window dilution</span>" if entry["dilution_suspect"] else ""}</td>'
                 "</tr>"
             )
     headers = (
         "Client", "Concurrency", "Efficiency", "Events/s", "p95 TTFC excess ms",
         "p95 stretch", "p99 max gap ms", "Failed", "Incomplete",
-        "Server slip p99 ms", "Client CPU", "Server CPU",
+        "Server slip p99 ms", "Client CPU", "Server CPU", "Artifact?",
     )
     header_html = "".join(f"<th>{escape(h)}</th>" for h in headers)
     table = (
@@ -308,16 +322,24 @@ def render_tier_section(aggregates: dict, tier: str) -> str:
     )
 
 
-def render_stops(sweep_meta: dict[str, Any]) -> str:
+def render_stops(sweep_meta: dict[str, Any], aggregates: dict) -> str:
     stops = sweep_meta.get("stops", {})
     if not stops:
         return "<p>No stop rules triggered.</p>"
     rows = []
     for key, info in sorted(stops.items()):
         tier, _, client = key.partition(":")
+        concurrency = info.get("concurrency", "")
+        reason = escape(info.get("reason", ""))
+        entry = aggregates.get((tier, client, concurrency))
+        if entry and entry["dilution_suspect"]:
+            reason += (
+                ' <span class="flag">likely window-dilution artifact — streams ran '
+                "on schedule (p95 stretch &lt; 1.05); treat this knee as suspect</span>"
+            )
         rows.append(
             f"<tr><th>{escape(tier)}</th><td>{escape(client)}</td>"
-            f"<td>{info.get('concurrency', '')}</td><td>{escape(info.get('reason', ''))}</td></tr>"
+            f"<td>{concurrency}</td><td>{reason}</td></tr>"
         )
     return (
         '<div class="table-wrap"><table>'
@@ -389,6 +411,7 @@ th:first-child, td:first-child {{ text-align: left; }}
 thead th {{ color: var(--ink-2); font-size: 12px; text-transform: uppercase;
   letter-spacing: .04em; }}
 .scope {{ color: var(--ink); font-weight: 600; }}
+.flag {{ color: #b45309; font-weight: 600; white-space: normal; }}
 {series_rules}
 """
 
@@ -479,7 +502,7 @@ def render_report(
   The drain client is a parse-free reference: any gap it shows is server/OS,
   any gap below it is client overhead.</p>
 </header>
-<section><h2>Stop rules triggered (knees)</h2>{render_stops(sweep_meta)}</section>
+<section><h2>Stop rules triggered (knees)</h2>{render_stops(sweep_meta, aggregates)}</section>
 {sections}
 </main>
 </body>
