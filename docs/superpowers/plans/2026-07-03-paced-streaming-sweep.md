@@ -74,7 +74,7 @@ Aggregation rules (identical everywhere):
 - successful = `ok && chunks == chunks_per_response`; incomplete = `ok && chunks != expected`; failed = `!ok`.
 - Percentiles (nearest-rank, existing implementations) over successful requests only; totals over successful only.
 - `ideal_stream_ms = (expected - 1) / events_per_second * 1000` when `events_per_second > 0 && expected > 1`, else stretch list is empty and stretch percentiles are 0.0. `stream_stretch = stream_ms / ideal_stream_ms` per successful request.
-- `ideal_events_per_second = events_per_second * concurrency` (0.0 when unpaced); `efficiency = chunks_per_second / ideal_events_per_second` (0.0 when unpaced).
+- **[AMENDED after Task 9 integration]** `ideal_events_per_second` must account for TTFC dead time in the closed loop: when `events_per_second > 0`, `ideal_request_seconds = ttfc_ms/1000 + (expected - 1)/events_per_second`, and `ideal_events_per_second = concurrency * expected / ideal_request_seconds` (0.0 if `ideal_request_seconds` is 0). When unpaced, 0.0. `efficiency = chunks_per_second / ideal_events_per_second` (0.0 when unpaced). The original `eps × concurrency` definition was unreachable for any client (a perfect closed-loop client idles through TTFC every request) and would have falsely triggered stop rules. Python's `aggregate_summary` gains a `ttfc_ms` parameter.
 - `requests_per_second = successful / duration_seconds`; `chunks_per_second = total_chunks / duration_seconds`.
 - `per_chunk_overhead_ms` is REMOVED from the schema.
 
