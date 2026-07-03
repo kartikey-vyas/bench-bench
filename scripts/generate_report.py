@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import math
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -132,8 +133,8 @@ def render_report(results_dir: Path, summaries: list[dict[str, Any]]) -> str:
     <section>
       <h2>Request Latency</h2>
       <div class="chart-grid">
-        {grouped_latency_chart(rows, "request", "Request latency percentiles")}
-        {grouped_latency_chart(rows, "ttfc", "Time To First Chunk percentiles")}
+        {latency_distribution_chart(rows, "request", "Request latency distribution")}
+        {latency_distribution_chart(rows, "ttfc", "Time To First Chunk distribution")}
       </div>
     </section>
 
@@ -249,7 +250,7 @@ def bar_chart(rows: list[dict[str, Any]], metric: str, title: str, higher_is_bet
 </article>"""
 
 
-def grouped_latency_chart(rows: list[dict[str, Any]], kind: str, title: str) -> str:
+def latency_distribution_chart(rows: list[dict[str, Any]], kind: str, title: str) -> str:
     if kind == "request":
         metrics = [
             ("p50", "p50_request_latency_ms"),
@@ -263,27 +264,98 @@ def grouped_latency_chart(rows: list[dict[str, Any]], kind: str, title: str) -> 
             ("p99", "p99_time_to_first_chunk_ms"),
         ]
 
-    width = 760
-    row_height = 34
-    label_width = 180
-    chart_width = 500
-    height = 56 + (len(rows) * len(metrics) * row_height)
+    width = 920
+    row_height = 68
+    label_width = 170
+    chart_width = 430
+    value_x = label_width + chart_width + 22
+    plot_top = 84
+    height = plot_top + (len(rows) * row_height) + 22
     all_values = [float(row["summary"].get(metric, 0.0)) for row in rows for _, metric in metrics]
     max_value = max(all_values) if all_values else 0.0
+    positive_values = [value for value in all_values if value > 0]
+    min_positive = min(positive_values) if positive_values else 0.0
+    use_log_scale = min_positive > 0 and max_value / min_positive >= 10
+
+    def x_for(value: float) -> float:
+        if max_value <= 0:
+            return float(label_width)
+        if use_log_scale:
+            lower = math.log10(min_positive)
+            upper = math.log10(max_value)
+            if upper == lower:
+                return float(label_width + chart_width / 2)
+            clamped = max(value, min_positive)
+            scaled = (math.log10(clamped) - lower) / (upper - lower)
+        else:
+            scaled = value / max_value
+        return label_width + (scaled * chart_width)
+
+    def axis_ticks() -> list[float]:
+        if max_value <= 0:
+            return [0.0]
+        if use_log_scale:
+            mid = math.sqrt(min_positive * max_value)
+            return [min_positive, mid, max_value]
+        return [0.0, max_value / 2, max_value]
+
+    scale_note = "log scale; lower is better" if use_log_scale else "linear scale; lower is better"
     svg_parts = [
         f'<svg viewBox="0 0 {width} {height}" role="img" aria-label="{escape(title)}">',
         f'<text x="0" y="20" class="svg-title">{escape(title)}</text>',
+        f'<text x="0" y="42" class="svg-note">{escape(scale_note)}</text>',
+        '<g class="latency-legend">',
+        f'<line x1="{label_width}" y1="42" x2="{label_width + 26}" y2="42" class="latency-range-sample"></line>',
+        f'<text x="{label_width + 34}" y="46" class="svg-value">p50-p95 range</text>',
+        f'<circle cx="{label_width + 152}" cy="42" r="5" class="latency-dot-sample"></circle>',
+        f'<text x="{label_width + 164}" y="46" class="svg-value">p99 tail</text>',
+        "</g>",
     ]
-    y = 48
+
+    for tick in axis_ticks():
+        x = x_for(tick)
+        svg_parts.append(f'<line x1="{x:.1f}" y1="58" x2="{x:.1f}" y2="{height - 16}" class="latency-grid"></line>')
+        svg_parts.append(f'<text x="{x:.1f}" y="72" class="svg-tick">{escape(format_number(tick))} ms</text>')
+
+    y = plot_top
     for row in rows:
         color = IMPLEMENTATION_COLORS.get(row["label"], "#475569")
-        for percentile_label, metric in metrics:
-            value = float(row["summary"].get(metric, 0.0))
-            bar_width = 0 if max_value == 0 else max(1, int((value / max_value) * chart_width))
-            svg_parts.append(f'<text x="0" y="{y + 15}" class="svg-label">{escape(row["label"])} {percentile_label}</text>')
-            svg_parts.append(f'<rect x="{label_width}" y="{y}" width="{bar_width}" height="20" fill="{color}" rx="3"></rect>')
-            svg_parts.append(f'<text x="{label_width + bar_width + 8}" y="{y + 15}" class="svg-value">{escape(format_number(value))} ms</text>')
-            y += row_height
+        values = {percentile_label: float(row["summary"].get(metric, 0.0)) for percentile_label, metric in metrics}
+        p50_x = x_for(values["p50"])
+        p95_x = x_for(values["p95"])
+        p99_x = x_for(values["p99"])
+        range_x = min(p50_x, p95_x)
+        range_width = max(3.0, abs(p95_x - p50_x))
+        center_y = y + 28
+        summary = (
+            f"p50 {format_number(values['p50'])} | "
+            f"p95 {format_number(values['p95'])} | "
+            f"p99 {format_number(values['p99'])} ms"
+        )
+        svg_parts.append(f'<g class="latency-lane" data-client="{escape(row["label"])}">')
+        svg_parts.append(f'<text x="0" y="{center_y + 4}" class="svg-label">{escape(row["label"])}</text>')
+        svg_parts.append(
+            f'<line x1="{label_width}" y1="{center_y}" x2="{label_width + chart_width}" y2="{center_y}" class="latency-track"></line>'
+        )
+        svg_parts.append(
+            f'<rect x="{range_x:.1f}" y="{center_y - 8}" width="{range_width:.1f}" height="16" '
+            f'fill="{color}" class="latency-range" data-percentile="p50-p95" rx="8"></rect>'
+        )
+        svg_parts.append(
+            f'<line x1="{p50_x:.1f}" y1="{center_y - 13}" x2="{p50_x:.1f}" y2="{center_y + 13}" '
+            f'stroke="{color}" class="latency-marker" data-percentile="p50"></line>'
+        )
+        svg_parts.append(
+            f'<line x1="{p95_x:.1f}" y1="{center_y - 13}" x2="{p95_x:.1f}" y2="{center_y + 13}" '
+            f'stroke="{color}" class="latency-marker" data-percentile="p95"></line>'
+        )
+        svg_parts.append(
+            f'<circle cx="{p99_x:.1f}" cy="{center_y}" r="5.5" fill="{color}" '
+            f'class="latency-tail" data-percentile="p99"></circle>'
+        )
+        svg_parts.append(f'<text x="{value_x}" y="{center_y + 4}" class="svg-value">{escape(summary)}</text>')
+        svg_parts.append("</g>")
+        y += row_height
     svg_parts.append("</svg>")
     return f"<article class=\"chart-card svg-card\">{''.join(svg_parts)}</article>"
 
@@ -411,6 +483,15 @@ dd { margin: 3px 0 0; font-weight: 700; color: #111827; overflow-wrap: anywhere;
 .svg-title { font: 700 17px system-ui, sans-serif; fill: #111827; }
 .svg-label { font: 12px system-ui, sans-serif; fill: #334155; }
 .svg-value { font: 12px system-ui, sans-serif; fill: #475569; }
+.svg-note { font: 12px system-ui, sans-serif; fill: #64748b; }
+.svg-tick { font: 11px system-ui, sans-serif; fill: #64748b; text-anchor: middle; }
+.latency-grid { stroke: #e2e8f0; stroke-width: 1; }
+.latency-track { stroke: #cbd5e1; stroke-width: 7; stroke-linecap: round; }
+.latency-range { opacity: .72; }
+.latency-marker { stroke-width: 2.25; stroke-linecap: round; }
+.latency-tail { stroke: #ffffff; stroke-width: 2; }
+.latency-range-sample { stroke: #64748b; stroke-width: 8; stroke-linecap: round; opacity: .72; }
+.latency-dot-sample { fill: #64748b; stroke: #ffffff; stroke-width: 2; }
 .table-wrap { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th, td { border-bottom: 1px solid #e2e8f0; padding: 10px 8px; text-align: right; white-space: nowrap; }

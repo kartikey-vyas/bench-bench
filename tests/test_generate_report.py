@@ -102,6 +102,23 @@ class GenerateReportTests(unittest.TestCase):
         self.assertIn("Rust Hyper + Tokio", html)
         self.assertIn("<svg", html)
 
+    def test_render_report_groups_latency_percentiles_per_client_lane(self):
+        summaries = [
+            make_summary("python", "asyncio-httpx", 100.0, 300.0),
+            make_summary("go", "net-http-goroutines", 400.0, 1200.0),
+            make_summary("rust", "reqwest-tokio", 200.0, 600.0),
+            make_summary("rust", "hyper-tokio", 300.0, 900.0),
+        ]
+
+        html = render_report(Path("results/20260630T090000Z"), summaries)
+
+        self.assertIn("Request latency distribution", html)
+        self.assertIn("Time To First Chunk distribution", html)
+        self.assertIn('class="latency-lane"', html)
+        self.assertIn('data-percentile="p99"', html)
+        self.assertIn("p50-p95 range", html)
+        self.assertNotIn("Python asyncio-httpx p50", html)
+
 
 def make_summary(language: str, implementation: str, req_s: float, chunks_s: float) -> dict:
     return {

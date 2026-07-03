@@ -95,7 +95,7 @@ Workload fields:
   "base_url": "http://127.0.0.1:8080",
   "total_requests": 10000,
   "concurrency": 256,
-  "chunks_per_response": 64,
+  "chunks_per_response": 512,
   "chunk_bytes": 32,
   "delay_us": 0,
   "warmup_requests": 500,
@@ -115,7 +115,7 @@ Each client writes `summary.json`:
   "config": {
     "total_requests": 10000,
     "concurrency": 256,
-    "chunks_per_response": 64,
+    "chunks_per_response": 512,
     "chunk_bytes": 32,
     "delay_us": 0
   },

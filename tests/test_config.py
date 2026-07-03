@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -20,6 +21,12 @@ class WorkloadConfigTests(unittest.TestCase):
         self.assertEqual(config.total_requests, 3)
         self.assertEqual(config.request_payload(7, "python")["chunks"], 4)
         self.assertEqual(config.request_payload(7, "python")["request_id"], "python-7")
+
+    def test_checked_in_workloads_use_at_least_512_chunks_per_response(self):
+        for path in Path("config").glob("workload.*.json"):
+            with self.subTest(path=path):
+                data = json.loads(path.read_text())
+                self.assertGreaterEqual(data["chunks_per_response"], 512)
 
 
 if __name__ == "__main__":
