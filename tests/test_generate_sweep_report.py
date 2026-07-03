@@ -81,6 +81,7 @@ class SweepReportTests(unittest.TestCase):
             write_cell(root, "eps500", 4, 0, "drain", 1.0)
             write_cell(root, "max", 4, 0, "go", 0.0, eps=0, ttfc=0)
             (root / "sweep.json").write_text(json.dumps({
+                "config": {"duration_seconds": 10.0, "concurrencies": [1, 4, 16]},
                 "stops": {"eps500:python": {"concurrency": 4, "reason": "efficiency 0.5 below 0.9"}},
             }))
 
@@ -89,6 +90,8 @@ class SweepReportTests(unittest.TestCase):
             html = written.read_text()
 
         self.assertIn("<svg", html)
+        self.assertIn("Run scope", html)
+        self.assertIn("Planned rungs missing from this run: 1, 16", html)
         self.assertIn("python", html)
         self.assertIn("drain", html)
         self.assertIn("Delivery efficiency", html)

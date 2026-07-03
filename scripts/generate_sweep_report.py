@@ -388,8 +388,35 @@ th, td {{ border-bottom: 1px solid var(--grid); padding: 8px;
 th:first-child, td:first-child {{ text-align: left; }}
 thead th {{ color: var(--ink-2); font-size: 12px; text-transform: uppercase;
   letter-spacing: .04em; }}
+.scope {{ color: var(--ink); font-weight: 600; }}
 {series_rules}
 """
+
+
+def describe_scope(cells: list[dict[str, Any]], sweep_meta: dict[str, Any]) -> str:
+    """One header line saying how big this run actually was, so a smoke run
+    can never be mistaken for a full sweep."""
+    config = sweep_meta.get("config") or {}
+    tiers = sorted({cell["tier"] for cell in cells})
+    concurrencies = sorted({cell["concurrency"] for cell in cells})
+    repeats = 1 + max((cell["repeat"] for cell in cells), default=0)
+    clients = sorted({cell["client"] for cell in cells})
+    duration = config.get("duration_seconds")
+    duration_text = f" · {format_number(duration, 0)}s measured windows" if duration else ""
+    scope = (
+        f"Run scope: {len(tiers)} tier(s) [{', '.join(tiers)}] · "
+        f"concurrency {', '.join(str(c) for c in concurrencies)} · "
+        f"{repeats} repeat(s) · {len(clients)} clients · "
+        f"{len(cells)} cell-runs{duration_text}."
+    )
+    planned = config.get("concurrencies")
+    if planned and len(concurrencies) < len(planned):
+        missing = [c for c in planned if c not in concurrencies]
+        scope += (
+            f" Planned rungs missing from this run: "
+            f"{', '.join(str(c) for c in missing)}."
+        )
+    return f'<p class="scope">{escape(scope)}</p>'
 
 
 def render_report(run_dir: Path, cells: list[dict[str, Any]], sweep_meta: dict[str, Any]) -> str:
@@ -420,6 +447,7 @@ def render_report(run_dir: Path, cells: list[dict[str, Any]], sweep_meta: dict[s
   <p class="eyebrow">Concurrency sweep — synthetic OpenAI-style streaming</p>
   <h1>Streaming Client Sweep Report</h1>
   <p>Run: {escape(str(run_dir))} · Generated: {escape(generated_at)}</p>
+  {describe_scope(cells, sweep_meta)}
   <p>Efficiency = observed parsed events/sec ÷ the achievable closed-loop ideal
   (concurrency × chunks ÷ (TTFC + (chunks−1)/rate)).
   The drain client is a parse-free reference: any gap it shows is server/OS,
