@@ -2,8 +2,16 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from scripts.run_sweep import SweepConfig, SweepTier, build_workload, rotated, stop_reason
+from scripts.run_sweep import (
+    SweepConfig,
+    SweepTier,
+    build_workload,
+    python_client_ready,
+    rotated,
+    stop_reason,
+)
 
 
 def sweep_config(**overrides):
@@ -108,6 +116,18 @@ class StopReasonTests(unittest.TestCase):
     def test_no_summaries_triggers_stop(self):
         sweep = sweep_config()
         self.assertIsNotNone(stop_reason(sweep, sweep.tiers[0], []))
+
+
+class PythonClientReadyTests(unittest.TestCase):
+    def test_missing_httpx_returns_false(self):
+        with patch("scripts.run_sweep.subprocess.run") as mock_run:
+            mock_run.return_value.returncode = 1
+            self.assertFalse(python_client_ready())
+
+    def test_importable_httpx_returns_true(self):
+        with patch("scripts.run_sweep.subprocess.run") as mock_run:
+            mock_run.return_value.returncode = 0
+            self.assertTrue(python_client_ready())
 
 
 if __name__ == "__main__":

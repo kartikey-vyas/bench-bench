@@ -1,9 +1,11 @@
+PYTHON := $(shell test -x .venv/bin/python && echo .venv/bin/python || echo python3)
+
 .PHONY: test test-python test-go test-rust smoke compare sweep sweep-smoke sweep-report
 
 test: test-python test-go test-rust
 
 test-python:
-	python3 -m unittest discover -s tests -v
+	$(PYTHON) -m unittest discover -s tests -v
 
 test-go:
 	cd go-client && go test ./...
@@ -13,16 +15,16 @@ test-rust:
 	cargo test --manifest-path rust-client/Cargo.toml
 
 smoke:
-	python3 scripts/run_smoke.py --config config/workload.smoke.json
+	$(PYTHON) scripts/run_smoke.py --config config/workload.smoke.json
 
 compare:
-	python3 scripts/compare_results.py results
+	$(PYTHON) scripts/compare_results.py results
 
 sweep:
-	python3 scripts/run_sweep.py --config config/sweep.default.json
+	$(PYTHON) scripts/run_sweep.py --config config/sweep.default.json
 
 sweep-smoke:
-	python3 scripts/run_sweep.py --config config/sweep.smoke.json
+	$(PYTHON) scripts/run_sweep.py --config config/sweep.smoke.json
 
 sweep-report:
-	python3 scripts/generate_sweep_report.py
+	$(PYTHON) scripts/generate_sweep_report.py

@@ -270,6 +270,16 @@ def write_sweep_record(run_dir: Path, record: dict[str, Any]) -> None:
     (run_dir / "sweep.json").write_text(json.dumps(record, indent=2) + "\n")
 
 
+def python_client_ready() -> bool:
+    """Check whether the running interpreter (used to launch the python client
+    subprocess via sys.executable) has httpx importable."""
+    result = subprocess.run(
+        [sys.executable, "-c", "import httpx"],
+        capture_output=True,
+    )
+    return result.returncode == 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run a tier x concurrency benchmark sweep.")
     parser.add_argument("--config", default="config/sweep.default.json", help="Path to sweep JSON.")
@@ -278,6 +288,16 @@ def main() -> int:
     args = parser.parse_args()
 
     sweep = SweepConfig.from_path(ROOT / args.config)
+
+    if "python" in sweep.clients and not python_client_ready():
+        print(
+            f"error: 'python' client requires httpx in the running interpreter "
+            f"({sys.executable}); run via .venv/bin/python or uv run, or remove "
+            f"'python' from clients",
+            file=sys.stderr,
+        )
+        return 2
+
     raise_file_limit()
     binaries = build_binaries()
 

@@ -95,7 +95,7 @@ class GenerateReportTests(unittest.TestCase):
         self.assertEqual(rows[1]["speedup_vs_python"], 4.0)
         self.assertEqual(rows[3]["speedup_vs_rust_reqwest"], 1.5)
 
-    def test_render_report_contains_charts_and_scaling_explanations(self):
+    def test_render_report_contains_charts_without_scaling_notes(self):
         summaries = [
             make_summary("python", "asyncio-httpx", 100.0, 300.0),
             make_summary("go", "net-http-goroutines", 400.0, 1200.0),

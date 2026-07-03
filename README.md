@@ -143,7 +143,7 @@ Each client writes `summary.json`:
     "total_chunks": 2632704,
     "total_bytes": 21061632,
     "requests_per_second": 257.1,
-    "chunks_per_second": 131635.2,
+    "chunks_per_second": 25471.0,
     "mean_request_latency_ms": 245.9,
     "p50_request_latency_ms": 244.1,
     "p95_request_latency_ms": 251.8,
@@ -159,8 +159,8 @@ Each client writes `summary.json`:
     "p50_stream_stretch": 0.97,
     "p95_stream_stretch": 1.01,
     "p99_stream_stretch": 1.05,
-    "ideal_events_per_second": 133120.0,
-    "efficiency": 0.989
+    "ideal_events_per_second": 26811.6,
+    "efficiency": 0.95
   }
 }
 ```
@@ -184,6 +184,11 @@ make sweep          # full sweep, hours — tune config/sweep.default.json
 make sweep-smoke    # 2-minute end-to-end sanity sweep
 make sweep-report   # writes reports/sweep/index.html from the newest run
 ```
+
+The Makefile auto-selects `.venv/bin/python` when present, falling back to
+`python3` otherwise; if you invoke `scripts/run_sweep.py` directly (bypassing
+`make`), use the project venv's Python as noted in Setup, or the sweep will
+fail fast with a preflight error when the `python` client is configured.
 
 Per (tier, client), concurrency escalation stops when failures exceed
 `stop_failure_fraction`, mean efficiency drops below `stop_efficiency_below`,
