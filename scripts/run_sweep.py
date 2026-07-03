@@ -1,0 +1,331 @@
+from __future__ import annotations
+
+import argparse
+import json
+import resource
+import subprocess
+import sys
+import threading
+import time
+import urllib.request
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+@dataclass(frozen=True)
+class SweepTier:
+    name: str
+    events_per_second: int
+    ttfc_ms: int
+
+
+@dataclass(frozen=True)
+class SweepConfig:
+    base_url: str
+    tiers: tuple[SweepTier, ...]
+    concurrencies: tuple[int, ...]
+    clients: tuple[str, ...]
+    duration_seconds: float
+    warmup_seconds: float
+    repeats: int
+    cooldown_seconds: float
+    chunks_per_response: int
+    chunk_bytes: int
+    stop_efficiency_below: float
+    stop_ttfc_excess_p95_ms: float
+    stop_failure_fraction: float
+    output_dir: str
+
+    @classmethod
+    def from_path(cls, path: str | Path) -> "SweepConfig":
+        data = json.loads(Path(path).read_text())
+        tiers = tuple(SweepTier(**tier) for tier in data.pop("tiers"))
+        concurrencies = tuple(data.pop("concurrencies"))
+        clients = tuple(data.pop("clients"))
+        return cls(tiers=tiers, concurrencies=concurrencies, clients=clients, **data)
+
+    def as_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        data["tiers"] = [asdict(tier) for tier in self.tiers]
+        data["concurrencies"] = list(self.concurrencies)
+        data["clients"] = list(self.clients)
+        return data
+
+
+def build_workload(sweep: SweepConfig, tier: SweepTier, concurrency: int) -> dict[str, Any]:
+    return {
+        "base_url": sweep.base_url,
+        "duration_seconds": sweep.duration_seconds,
+        "warmup_seconds": sweep.warmup_seconds,
+        "concurrency": concurrency,
+        "chunks_per_response": sweep.chunks_per_response,
+        "chunk_bytes": sweep.chunk_bytes,
+        "ttfc_ms": tier.ttfc_ms,
+        "events_per_second": tier.events_per_second,
+        "output_dir": sweep.output_dir,
+    }
+
+
+def rotated(items: tuple[str, ...], repeat: int) -> list[str]:
+    if not items:
+        return []
+    shift = repeat % len(items)
+    return list(items[shift:] + items[:shift])
+
+
+def stop_reason(sweep: SweepConfig, tier: SweepTier, summaries: list[dict[str, Any]]) -> str | None:
+    if not summaries:
+        return "client produced no results"
+    total = sum(
+        s["successful_requests"] + s["incomplete_requests"] + s["failed_requests"]
+        for s in summaries
+    )
+    if total == 0:
+        return "no requests completed"
+    bad = sum(s["incomplete_requests"] + s["failed_requests"] for s in summaries)
+    failure_fraction = bad / total
+    if failure_fraction > sweep.stop_failure_fraction:
+        return f"failure fraction {failure_fraction:.4f} above {sweep.stop_failure_fraction}"
+    if tier.events_per_second > 0:
+        mean_efficiency = sum(s["efficiency"] for s in summaries) / len(summaries)
+        if mean_efficiency < sweep.stop_efficiency_below:
+            return f"efficiency {mean_efficiency:.3f} below {sweep.stop_efficiency_below}"
+        mean_excess = (
+            sum(s["p95_time_to_first_chunk_ms"] for s in summaries) / len(summaries)
+            - tier.ttfc_ms
+        )
+        if mean_excess > sweep.stop_ttfc_excess_p95_ms:
+            return f"p95 TTFC excess {mean_excess:.1f}ms above {sweep.stop_ttfc_excess_p95_ms}ms"
+    return None
+
+
+class CpuSampler:
+    """Samples %CPU for named pids via `ps` on a background thread."""
+
+    def __init__(self, pids: dict[str, int], interval_seconds: float = 0.5) -> None:
+        self._pids = pids
+        self._interval = interval_seconds
+        self._samples: dict[str, list[float]] = {name: [] for name in pids}
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self) -> "CpuSampler":
+        self._thread.start()
+        return self
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            for name, pid in self._pids.items():
+                result = subprocess.run(
+                    ["ps", "-p", str(pid), "-o", "%cpu="],
+                    capture_output=True,
+                    text=True,
+                )
+                value = result.stdout.strip()
+                if result.returncode == 0 and value:
+                    try:
+                        self._samples[name].append(float(value))
+                    except ValueError:
+                        pass
+            self._stop.wait(self._interval)
+
+    def stop(self) -> dict[str, dict[str, float]]:
+        self._stop.set()
+        self._thread.join(timeout=5)
+        report: dict[str, dict[str, float]] = {}
+        for name, values in self._samples.items():
+            if values:
+                report[name] = {
+                    "mean_percent": sum(values) / len(values),
+                    "max_percent": max(values),
+                    "samples": len(values),
+                }
+            else:
+                report[name] = {"mean_percent": 0.0, "max_percent": 0.0, "samples": 0}
+        return report
+
+
+def raise_file_limit(target: int = 65536) -> None:
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    desired = target if hard == resource.RLIM_INFINITY else min(target, hard)
+    if soft < desired:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (desired, hard))
+
+
+def http_get_json(url: str) -> dict[str, Any]:
+    with urllib.request.urlopen(url, timeout=5) as response:
+        return json.loads(response.read())
+
+
+def http_post(url: str) -> None:
+    request = urllib.request.Request(url, method="POST")
+    with urllib.request.urlopen(request, timeout=5) as response:
+        response.read()
+
+
+def wait_for_health(url: str, timeout_seconds: float = 30.0) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=0.5) as response:
+                if response.status == 200:
+                    return
+        except OSError as error:
+            last_error = error
+        time.sleep(0.1)
+    raise RuntimeError(f"server did not become healthy at {url}: {last_error}")
+
+
+def build_binaries() -> dict[str, Path]:
+    subprocess.run(
+        ["cargo", "build", "--release", "--manifest-path", str(ROOT / "server-rust" / "Cargo.toml")],
+        check=True,
+    )
+    subprocess.run(
+        ["cargo", "build", "--release", "--manifest-path", str(ROOT / "rust-client" / "Cargo.toml")],
+        check=True,
+    )
+    go_binary = ROOT / "go-client" / "bin" / "bench-go-client"
+    go_binary.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["go", "build", "-o", str(go_binary), "."], cwd=ROOT / "go-client", check=True)
+    return {
+        "server": ROOT / "server-rust" / "target" / "release" / "synthetic-openai-server",
+        "rust": ROOT / "rust-client" / "target" / "release" / "rust-benchmark-client",
+        "go": go_binary,
+    }
+
+
+def client_command(name: str, binaries: dict[str, Path], config_path: Path, out_dir: Path) -> list[str]:
+    if name == "python":
+        return [
+            sys.executable, "-m", "bench_harness.python_client",
+            "--config", str(config_path), "--output-dir", str(out_dir),
+        ]
+    if name == "go":
+        return [str(binaries["go"]), "--config", str(config_path), "--output-dir", str(out_dir)]
+    rust_kinds = {"rust-reqwest": "reqwest", "rust-hyper": "hyper", "drain": "drain"}
+    if name in rust_kinds:
+        return [
+            str(binaries["rust"]),
+            "--config", str(config_path), "--output-dir", str(out_dir),
+            "--client", rust_kinds[name],
+        ]
+    raise ValueError(f"unknown client {name!r}")
+
+
+def run_cell_client(
+    sweep: SweepConfig,
+    binaries: dict[str, Path],
+    server_pid: int,
+    client_name: str,
+    config_path: Path,
+    out_dir: Path,
+) -> dict[str, Any] | None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    http_post(f"{sweep.base_url}/stats/reset")
+
+    command = client_command(client_name, binaries, config_path, out_dir)
+    print("+", " ".join(command))
+    process = subprocess.Popen(command, cwd=ROOT)
+    sampler = CpuSampler({"server": server_pid, "client": process.pid}).start()
+    returncode = process.wait()
+    cpu = sampler.stop()
+    server_stats = http_get_json(f"{sweep.base_url}/stats")
+
+    (out_dir / "server_stats.json").write_text(json.dumps(server_stats, indent=2) + "\n")
+    (out_dir / "cpu.json").write_text(json.dumps(cpu, indent=2) + "\n")
+
+    if returncode != 0:
+        print(f"warning: {client_name} exited {returncode}", file=sys.stderr)
+        return None
+    summary_path = out_dir / "summary.json"
+    if not summary_path.exists():
+        print(f"warning: {client_name} wrote no summary.json", file=sys.stderr)
+        return None
+    return json.loads(summary_path.read_text())
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Run a tier x concurrency benchmark sweep.")
+    parser.add_argument("--config", default="config/sweep.default.json", help="Path to sweep JSON.")
+    parser.add_argument("--bind", default="127.0.0.1:8080", help="Server bind address.")
+    parser.add_argument("--results-dir", default="results", help="Root directory for run output.")
+    args = parser.parse_args()
+
+    sweep = SweepConfig.from_path(ROOT / args.config)
+    raise_file_limit()
+    binaries = build_binaries()
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    run_dir = ROOT / args.results_dir / timestamp
+    (run_dir / "configs").mkdir(parents=True, exist_ok=True)
+
+    server = subprocess.Popen([str(binaries["server"]), "--bind", args.bind])
+    record: dict[str, Any] = {
+        "config": sweep.as_dict(),
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "stops": {},
+        "cells": [],
+    }
+    try:
+        wait_for_health(f"{sweep.base_url}/health")
+
+        for tier in sweep.tiers:
+            active = list(sweep.clients)
+            for concurrency in sweep.concurrencies:
+                if not active:
+                    break
+                workload = build_workload(sweep, tier, concurrency)
+                config_path = run_dir / "configs" / f"{tier.name}-c{concurrency}.json"
+                config_path.write_text(json.dumps(workload, indent=2) + "\n")
+
+                cell_summaries: dict[str, list[dict[str, Any]]] = {name: [] for name in active}
+                for repeat in range(sweep.repeats):
+                    for client_name in rotated(tuple(active), repeat):
+                        out_dir = run_dir / tier.name / f"c{concurrency}" / f"r{repeat}" / client_name
+                        result = run_cell_client(
+                            sweep, binaries, server.pid, client_name, config_path, out_dir
+                        )
+                        record["cells"].append({
+                            "tier": tier.name,
+                            "concurrency": concurrency,
+                            "repeat": repeat,
+                            "client": client_name,
+                            "ok": result is not None,
+                        })
+                        if result is not None:
+                            cell_summaries[client_name].append(result["summary"])
+
+                for client_name in list(active):
+                    reason = stop_reason(sweep, tier, cell_summaries[client_name])
+                    if reason:
+                        active.remove(client_name)
+                        record["stops"][f"{tier.name}:{client_name}"] = {
+                            "concurrency": concurrency,
+                            "reason": reason,
+                        }
+                        print(f"stop {tier.name}/{client_name} at c={concurrency}: {reason}")
+
+                if sweep.cooldown_seconds > 0:
+                    time.sleep(sweep.cooldown_seconds)
+    finally:
+        server.terminate()
+        try:
+            server.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            server.kill()
+            server.wait(timeout=5)
+
+    record["finished_at"] = datetime.now(timezone.utc).isoformat()
+    (run_dir / "sweep.json").write_text(json.dumps(record, indent=2) + "\n")
+    print(run_dir)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

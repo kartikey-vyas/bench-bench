@@ -1,0 +1,18 @@
+{
+  "base_url": "http://127.0.0.1:8080",
+  "tiers": [
+    {"name": "eps2000", "events_per_second": 2000, "ttfc_ms": 20}
+  ],
+  "concurrencies": [1, 4],
+  "clients": ["drain", "python", "go", "rust-reqwest", "rust-hyper"],
+  "duration_seconds": 2.0,
+  "warmup_seconds": 0.5,
+  "repeats": 1,
+  "cooldown_seconds": 0.0,
+  "chunks_per_response": 64,
+  "chunk_bytes": 8,
+  "stop_efficiency_below": 0.5,
+  "stop_ttfc_excess_p95_ms": 500.0,
+  "stop_failure_fraction": 0.05,
+  "output_dir": "results"
+}
