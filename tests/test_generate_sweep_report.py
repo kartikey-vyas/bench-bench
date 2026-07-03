@@ -1,4 +1,5 @@
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -94,6 +95,26 @@ class SweepReportTests(unittest.TestCase):
         self.assertIn("Observed events/sec", html)   # max tier fallback chart
         self.assertIn("efficiency 0.5 below 0.9", html)  # knee table
         self.assertIn("<table", html)                # relief rule: table view
+
+    def test_direct_labels_do_not_collide(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "run"
+            for client in ("python", "go", "rust-reqwest", "rust-hyper"):
+                write_cell(root, "eps500", 4, 0, client, 0.99)
+
+            html = render_report(root, load_cells(root), {})
+
+        svg_fragments = html.split("<svg")[1:]
+        self.assertTrue(svg_fragments)
+        for fragment in svg_fragments:
+            y_values = [
+                float(y)
+                for y in re.findall(r'<text x="[^"]+" y="([0-9.]+)" class="direct-label"', fragment)
+            ]
+            self.assertGreaterEqual(len(y_values), 1)
+            y_values.sort()
+            for prev, curr in zip(y_values, y_values[1:]):
+                self.assertGreaterEqual(curr - prev, 13.5)
 
 
 if __name__ == "__main__":

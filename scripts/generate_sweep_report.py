@@ -140,11 +140,14 @@ def line_chart(
         clamped = min(max(value, 0.0), y_max)
         return top + plot_h - (clamped / y_max) * plot_h if y_max > 0 else top + plot_h
 
+    LABEL_GAP = 14.0
+
     parts = [
         f'<svg viewBox="0 0 {width} {height}" role="img" aria-label="{escape(title)}">',
         f'<text x="0" y="20" class="svg-title">{escape(title)}</text>',
         f'<text x="0" y="38" class="svg-note">{escape(y_label)} vs concurrency</text>',
     ]
+    end_labels: list[tuple[str, float, float]] = []  # (name, anchor_x, desired_y)
     for tick_index in range(5):
         tick_value = y_max * tick_index / 4
         y = y_for(tick_value)
@@ -183,10 +186,25 @@ def line_chart(
                 f'<title>{escape(name)} · c={concurrency} · {format_number(value, value_digits)}</title></circle>'
             )
         last_concurrency, (last_value, _, _) = points[-1]
-        parts.append(
-            f'<text x="{x_for(last_concurrency) + 10:.1f}" y="{y_for(last_value) + 4:.1f}" '
-            f'class="direct-label">{escape(name)}</text>'
-        )
+        end_labels.append((name, x_for(last_concurrency), y_for(last_value) + 4))
+
+    if end_labels:
+        end_labels.sort(key=lambda entry: entry[2])
+        resolved: list[float] = []
+        for _, _, desired_y in end_labels:
+            prev_y = resolved[-1] if resolved else None
+            y = desired_y if prev_y is None else max(desired_y, prev_y + LABEL_GAP)
+            resolved.append(y)
+        plot_bottom = top + plot_h + 10
+        overflow = resolved[-1] - plot_bottom
+        if overflow > 0:
+            resolved = [y - overflow for y in resolved]
+            plot_top = top + 10
+            resolved = [max(y, plot_top) for y in resolved]
+        for (name, anchor_x, _), y in zip(end_labels, resolved):
+            parts.append(
+                f'<text x="{anchor_x + 10:.1f}" y="{y:.1f}" class="direct-label">{escape(name)}</text>'
+            )
 
     parts.append("</svg>")
     return f'<article class="chart-card">{"".join(parts)}</article>'
