@@ -53,6 +53,11 @@ class SweepConfig:
         tiers = tuple(SweepTier(**tier) for tier in data.pop("tiers"))
         concurrencies = tuple(data.pop("concurrencies"))
         clients = tuple(data.pop("clients"))
+        worker_threads = data.get("server_worker_threads")
+        if worker_threads is not None and worker_threads <= 0:
+            raise ValueError(
+                f"server_worker_threads must be None or > 0, got {worker_threads!r}"
+            )
         return cls(tiers=tiers, concurrencies=concurrencies, clients=clients, **data)
 
     def as_dict(self) -> dict[str, Any]:
@@ -108,6 +113,24 @@ def stop_reason(sweep: SweepConfig, tier: SweepTier, summaries: list[dict[str, A
         if mean_excess > sweep.stop_ttfc_excess_p95_ms:
             return f"p95 TTFC excess {mean_excess:.1f}ms above {sweep.stop_ttfc_excess_p95_ms}ms"
     return None
+
+
+def resolve_stop_reason(
+    sweep: SweepConfig,
+    tier: SweepTier,
+    summaries: list[dict[str, Any]],
+    failed_runs: int,
+) -> str | None:
+    """Combine crashed/timed-out repeats with the summary-based stop rules.
+
+    A repeat that produced no summary (crash, timeout, missing summary.json)
+    must not be silently dropped from consideration: without this, a client
+    that fails 2 of 3 repeats but "succeeds" on the third can look healthy to
+    `stop_reason`, which only ever sees the summaries that did land.
+    """
+    if failed_runs:
+        return f"{failed_runs} run(s) produced no summary"
+    return stop_reason(sweep, tier, summaries)
 
 
 def format_duration(seconds: float) -> str:
@@ -459,6 +482,7 @@ def main() -> int:
                 )
 
                 cell_summaries: dict[str, list[dict[str, Any]]] = {name: [] for name in active}
+                cell_failures: dict[str, int] = {name: 0 for name in active}
                 for repeat in range(sweep.repeats):
                     for client_name in rotated(tuple(active), repeat):
                         run_label = (
@@ -492,9 +516,13 @@ def main() -> int:
                         })
                         if result is not None:
                             cell_summaries[client_name].append(result["summary"])
+                        else:
+                            cell_failures[client_name] += 1
 
                 for client_name in list(active):
-                    reason = stop_reason(sweep, tier, cell_summaries[client_name])
+                    reason = resolve_stop_reason(
+                        sweep, tier, cell_summaries[client_name], cell_failures.get(client_name, 0)
+                    )
                     if reason:
                         active.remove(client_name)
                         record["stops"][f"{tier.name}:{client_name}"] = {

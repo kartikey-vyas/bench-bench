@@ -294,9 +294,9 @@ impl StreamTiming {
     }
 
     fn measurement(&self, ok: bool, chunks: usize, bytes: usize) -> Measurement {
-        let first_chunk_ms = self
-            .first_event_at
-            .map_or(0.0, |at| at.duration_since(self.started).as_secs_f64() * 1000.0);
+        let first_chunk_ms = self.first_event_at.map_or(0.0, |at| {
+            at.duration_since(self.started).as_secs_f64() * 1000.0
+        });
         let stream_ms = match (self.first_event_at, self.last_event_at) {
             (Some(first), Some(last)) => last.duration_since(first).as_secs_f64() * 1000.0,
             _ => 0.0,
@@ -458,10 +458,11 @@ pub async fn run_one_drain_request(
 ) -> Measurement {
     let started = Instant::now();
     let mut timing = StreamTiming::new(started);
-    let body = match serde_json::to_vec(&config.request_payload(worker_index, sequence, "rust-drain")) {
-        Ok(body) => body,
-        Err(_) => return timing.measurement(false, 0, 0),
-    };
+    let body =
+        match serde_json::to_vec(&config.request_payload(worker_index, sequence, "rust-drain")) {
+            Ok(body) => body,
+            Err(_) => return timing.measurement(false, 0, 0),
+        };
 
     let request = match Request::post(config.endpoint())
         .header(header::CONTENT_TYPE, "application/json")
@@ -615,7 +616,11 @@ pub async fn run_benchmark_with_client(
     Ok(result)
 }
 
-pub fn aggregate_summary(measurements: &[Measurement], duration_ms: f64, config: &Config) -> Summary {
+pub fn aggregate_summary(
+    measurements: &[Measurement],
+    duration_ms: f64,
+    config: &Config,
+) -> Summary {
     let expected = config.chunks_per_response;
     let mut latencies = Vec::new();
     let mut first_chunks = Vec::new();

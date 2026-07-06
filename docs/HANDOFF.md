@@ -52,7 +52,7 @@ Full design + contracts (wire protocol, 25-key summary schema, aggregation rules
 
 ## Known open issues (priority order)
 
-1. **Window-dilution artifact is flagged but not fixed.** Root fix = window-clipped counting: clients count only chunks received inside the measured window; denominator = the window itself. Contained change: all 4 clients + aggregation + tests. Matters most for low-rate tiers and the dense ladder — false stops prune real rungs (this already cost rust-hyper its eps100/c1024 cell).
+1. **Window-dilution artifact is flagged but not fixed.** Root fix = window-clipped counting: clients count only chunks received inside the measured window; denominator = the window itself. Contained change: all six real clients + drain + aggregation + tests. Matters most for low-rate tiers and the dense ladder — false stops prune real rungs (this already cost rust-hyper its eps100/c1024 cell).
 2. Stop rules act on diluted numbers mid-sweep (consequence of #1).
 3. `CpuSampler` uses `ps -o %cpu` (decaying average on macOS; on Linux it's total-lifetime average) — treat CPU numbers as indicative. A proper interval sampler (delta of utime/stime from /proc) would be better on Linux.
 4. Workers are phase-locked (all start at t=0 with identical cycle lengths), so connect bursts recur in lockstep — python's TTFC knee partially reflects synchronized arrivals. Optional: stagger worker start by i×(cycle/N).
@@ -78,7 +78,7 @@ make sweep-report                              # or: uv run bench-sweep-report <
 Notes:
 - The runner builds all binaries, starts the server itself (port 8080), raises RLIMIT_NOFILE, writes `results/<UTC>/…` incrementally (`sweep.json` survives crashes/ctrl-C), and prints `[N/total]` progress with ETA.
 - The python client MUST run under the venv interpreter (the runner fails fast with exit 2 if httpx is missing — that is the designed behavior, not a bug).
-- Profile ceiling: 12 rungs × 5 tiers × 3 repeats × 5 clients ≈ 900 runs ≈ 4h; stop rules prune. `make sweep-smoke` (~30s) is the sanity gate after any change.
+- Profile ceiling: 12 rungs × 5 tiers × 3 repeats × 7 clients ≈ 1260 runs, ~5.5h+ ceiling for `sweep.linux.json`; stop rules prune. `make sweep-smoke` (~30s) is the sanity gate after any change.
 - Cooldowns are 5s; at high rungs watch for TIME_WAIT/ephemeral-port pressure if failures appear at c≥768 (failures at high rungs only = environment, per interpretation rule 4).
 - Interesting numbers to extract: drain's curve on isolated server cores = the Rust server's true delivery ceiling; whether go vs rust separate at 384–1024 once dilution and contention are gone.
 

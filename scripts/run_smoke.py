@@ -112,6 +112,7 @@ def run_clients(config: Path, run_dir: Path) -> int:
 
     if require_tool("cargo"):
         for client_name in ("reqwest", "hyper", "drain"):
+            out_name = "drain" if client_name == "drain" else f"rust-{client_name}"
             failures += run_command(
                 [
                     "cargo",
@@ -123,7 +124,7 @@ def run_clients(config: Path, run_dir: Path) -> int:
                     "--config",
                     str(config),
                     "--output-dir",
-                    str(run_dir / f"rust-{client_name}"),
+                    str(run_dir / out_name),
                     "--client",
                     client_name,
                 ]

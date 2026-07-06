@@ -1,4 +1,7 @@
-use rust_client::{aggregate_summary, percentile, ClientKind, Config, Measurement, SseDecoder, EventBoundaryCounter};
+use rust_client::{
+    aggregate_summary, percentile, ClientKind, Config, EventBoundaryCounter, Measurement,
+    SseDecoder,
+};
 
 #[test]
 fn boundary_counter_handles_splits_across_feeds() {

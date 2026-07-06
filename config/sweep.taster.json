@@ -4,7 +4,7 @@
     {"name": "eps500", "events_per_second": 500, "ttfc_ms": 200}
   ],
   "concurrencies": [1, 4, 16, 64, 256, 1024],
-  "clients": ["drain", "python", "go", "rust-reqwest", "rust-hyper"],
+  "clients": ["drain", "python-openai", "python", "python-deferred", "go", "rust-reqwest", "rust-hyper"],
   "duration_seconds": 10.0,
   "warmup_seconds": 2.0,
   "repeats": 2,

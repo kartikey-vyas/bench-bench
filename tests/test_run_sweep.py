@@ -11,6 +11,7 @@ from scripts.run_sweep import (
     build_workload,
     format_duration,
     python_client_ready,
+    resolve_stop_reason,
     rotated,
     server_command,
     stop_reason,
@@ -74,6 +75,30 @@ class SweepConfigTests(unittest.TestCase):
         self.assertEqual(config.tiers[0].name, "max")
         self.assertEqual(config.concurrencies, (1, 2))
 
+    def test_from_path_rejects_non_positive_worker_threads(self):
+        for bad_value in (0, -1):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                path = Path(tmpdir) / "sweep.json"
+                path.write_text(json.dumps({
+                    "base_url": "http://127.0.0.1:8080",
+                    "tiers": [{"name": "max", "events_per_second": 0, "ttfc_ms": 0}],
+                    "concurrencies": [1, 2],
+                    "clients": ["python"],
+                    "duration_seconds": 1.0,
+                    "warmup_seconds": 0.0,
+                    "repeats": 1,
+                    "cooldown_seconds": 0.0,
+                    "chunks_per_response": 16,
+                    "chunk_bytes": 8,
+                    "stop_efficiency_below": 0.9,
+                    "stop_ttfc_excess_p95_ms": 100.0,
+                    "stop_failure_fraction": 0.001,
+                    "output_dir": "results",
+                    "server_worker_threads": bad_value,
+                }))
+                with self.assertRaises(ValueError):
+                    SweepConfig.from_path(path)
+
     def test_build_workload_maps_tier_and_concurrency(self):
         sweep = sweep_config()
         workload = build_workload(sweep, sweep.tiers[0], 4)
@@ -120,6 +145,23 @@ class StopReasonTests(unittest.TestCase):
     def test_no_summaries_triggers_stop(self):
         sweep = sweep_config()
         self.assertIsNotNone(stop_reason(sweep, sweep.tiers[0], []))
+
+
+class ResolveStopReasonTests(unittest.TestCase):
+    def test_failed_runs_stop_even_with_healthy_summaries(self):
+        # 2 of 3 repeats crashed/timed-out; the one summary that did land looks
+        # perfectly healthy. Without counting failed runs this would escalate.
+        sweep = sweep_config()
+        reason = resolve_stop_reason(sweep, sweep.tiers[0], [summary()], failed_runs=2)
+        self.assertEqual(reason, "2 run(s) produced no summary")
+
+    def test_no_failed_runs_falls_back_to_stop_reason(self):
+        sweep = sweep_config()
+        self.assertIsNone(
+            resolve_stop_reason(sweep, sweep.tiers[0], [summary(), summary()], failed_runs=0)
+        )
+        reason = resolve_stop_reason(sweep, sweep.tiers[0], [summary(efficiency=0.5)], failed_runs=0)
+        self.assertIn("efficiency", reason)
 
 
 class SweepProgressTests(unittest.TestCase):

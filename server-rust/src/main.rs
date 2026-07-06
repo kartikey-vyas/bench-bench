@@ -58,9 +58,10 @@ async fn serve(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         let service = router.clone();
         tokio::spawn(async move {
             let io = TokioIo::new(socket);
-            let hyper_service = hyper::service::service_fn(
-                move |request: hyper::Request<Incoming>| service.clone().call(request),
-            );
+            let hyper_service =
+                hyper::service::service_fn(move |request: hyper::Request<Incoming>| {
+                    service.clone().call(request)
+                });
             let _ = auto::Builder::new(TokioExecutor::new())
                 .serve_connection(io, hyper_service)
                 .await;

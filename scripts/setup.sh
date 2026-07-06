@@ -2,6 +2,7 @@
 # Bootstrap the benchmark toolchain: rustup/cargo, Go (>= 1.22), uv + venv,
 # and (Linux) taskset. Idempotent — checks before installing, safe to re-run.
 set -euo pipefail
+cd "$(dirname "$0")/.."
 
 MIN_GO_MINOR=22
 OS="$(uname -s)"
@@ -94,9 +95,9 @@ else
     ok "uv: $(uv --version)"
 fi
 
-echo "  sync  python venv (httpx)"
+echo "  sync  python venv (httpx + openai)"
 uv sync
-ok "python: $(.venv/bin/python --version) with httpx"
+ok "python: $(.venv/bin/python --version) with httpx + openai"
 
 # --- Linux extras ----------------------------------------------------------
 if [ "$OS" = "Linux" ]; then

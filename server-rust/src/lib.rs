@@ -72,7 +72,11 @@ impl StreamPlan {
         if !include_role && count == 1 {
             return self.content_event.clone();
         }
-        let role_len = if include_role { self.role_event.len() } else { 0 };
+        let role_len = if include_role {
+            self.role_event.len()
+        } else {
+            0
+        };
         let mut buffer = BytesMut::with_capacity(role_len + count * self.content_event.len());
         if include_role {
             buffer.put_slice(&self.role_event);
@@ -106,12 +110,19 @@ pub fn validate_request(request: &ChatRequest) -> Result<(), String> {
         return Err(format!("ttfc_ms must be <= {MAX_TTFC_MS}"));
     }
     if request.events_per_second.unwrap_or(0) > MAX_EVENTS_PER_SECOND {
-        return Err(format!("events_per_second must be <= {MAX_EVENTS_PER_SECOND}"));
+        return Err(format!(
+            "events_per_second must be <= {MAX_EVENTS_PER_SECOND}"
+        ));
     }
     Ok(())
 }
 
-fn sse_event(id: &str, model: &str, delta: &Value, finish_reason: &Value) -> Result<String, String> {
+fn sse_event(
+    id: &str,
+    model: &str,
+    delta: &Value,
+    finish_reason: &Value,
+) -> Result<String, String> {
     let payload = json!({
         "id": id,
         "object": "chat.completion.chunk",
@@ -128,11 +139,24 @@ pub fn build_stream_plan(request: &ChatRequest) -> Result<StreamPlan, String> {
     let chunks = request.chunks.unwrap_or(DEFAULT_CHUNKS);
     let chunk_bytes = request.chunk_bytes.unwrap_or(DEFAULT_CHUNK_BYTES);
     let model = request.model.as_deref().unwrap_or("synthetic");
-    let id = request.request_id.as_deref().unwrap_or("chatcmpl-synthetic");
+    let id = request
+        .request_id
+        .as_deref()
+        .unwrap_or("chatcmpl-synthetic");
     let events_per_second = request.events_per_second.unwrap_or(0);
 
-    let role_event = sse_event(id, model, &json!({"role": "assistant", "content": ""}), &Value::Null)?;
-    let content_event = sse_event(id, model, &json!({"content": "x".repeat(chunk_bytes)}), &Value::Null)?;
+    let role_event = sse_event(
+        id,
+        model,
+        &json!({"role": "assistant", "content": ""}),
+        &Value::Null,
+    )?;
+    let content_event = sse_event(
+        id,
+        model,
+        &json!({"content": "x".repeat(chunk_bytes)}),
+        &Value::Null,
+    )?;
     let finish_event = sse_event(id, model, &json!({}), &json!("stop"))?;
     let finale = format!("{finish_event}data: [DONE]\n\n");
 
@@ -326,7 +350,10 @@ async fn chat_completions(
 
     let mut response = Response::new(Body::from_stream(response_stream));
     let headers = response.headers_mut();
-    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/event-stream"),
+    );
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
     headers.insert(header::CONNECTION, HeaderValue::from_static("keep-alive"));
     Ok(response)

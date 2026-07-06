@@ -79,14 +79,19 @@ async def run_one_request(
                 "request_id": payload["request_id"],
             },
         )
-        async for chunk in stream:
-            observe_event()
-            if not chunk.choices:
-                continue
-            content = chunk.choices[0].delta.content or ""
-            if content:
-                chunks += 1
-                content_bytes += len(content.encode("utf-8"))
+        try:
+            async for chunk in stream:
+                observe_event()
+                if not chunk.choices:
+                    continue
+                content = chunk.choices[0].delta.content or ""
+                if content:
+                    chunks += 1
+                    content_bytes += len(content.encode("utf-8"))
+        finally:
+            close = getattr(stream, "close", None)
+            if close is not None:
+                await close()
     except Exception:
         return measurement(ok=False)
 

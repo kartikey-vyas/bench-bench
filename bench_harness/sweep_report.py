@@ -4,9 +4,12 @@ import argparse
 import html
 import json
 import re
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+ROOT = Path(__file__).resolve().parents[1]
 
 RUN_DIR_RE = re.compile(r"^\d{8}T\d{6}Z$")
 
@@ -70,6 +73,26 @@ def mean(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
 
 
+# Config keys that every cell within a (tier, client, concurrency) group must
+# agree on. Disagreement means the group is silently mixing runs from
+# incompatible configs (e.g. a re-run with a different ttfc_ms merged into the
+# same report) — we still aggregate rather than crash, but we must say so.
+MERGE_CONSISTENCY_KEYS = ("ttfc_ms", "events_per_second", "chunks_per_response", "duration_seconds")
+
+
+def warn_on_config_disagreement(key: tuple[str, str, int], group: list[dict[str, Any]]) -> None:
+    tier, client, concurrency = key
+    for config_key in MERGE_CONSISTENCY_KEYS:
+        values = {cell["config"].get(config_key) for cell in group}
+        if len(values) > 1:
+            print(
+                f"warning: merged cells for tier={tier!r} client={client!r} "
+                f"concurrency={concurrency} disagree on {config_key!r}: "
+                f"{sorted(values, key=str)} — aggregating anyway, results may be misleading",
+                file=sys.stderr,
+            )
+
+
 def aggregate_cells(cells: list[dict[str, Any]]) -> dict[tuple[str, str, int], dict[str, Any]]:
     grouped: dict[tuple[str, str, int], list[dict[str, Any]]] = {}
     for cell in cells:
@@ -77,6 +100,7 @@ def aggregate_cells(cells: list[dict[str, Any]]) -> dict[tuple[str, str, int], d
 
     aggregates: dict[tuple[str, str, int], dict[str, Any]] = {}
     for key, group in grouped.items():
+        warn_on_config_disagreement(key, group)
         efficiencies = [c["summary"]["efficiency"] for c in group]
         config = group[0]["config"]
         ttfc_ms = float(config.get("ttfc_ms", 0))
@@ -455,7 +479,15 @@ def describe_scope(cells: list[dict[str, Any]], sweep_meta: dict[str, Any]) -> s
     config = sweep_meta.get("config") or {}
     tiers = sorted({cell["tier"] for cell in cells})
     concurrencies = sorted({cell["concurrency"] for cell in cells})
-    repeats = 1 + max((cell["repeat"] for cell in cells), default=0)
+    # Max multiplicity across (tier, client, concurrency) groups, not
+    # 1 + max(repeat): merged single-repeat runs (each cell's repeat index is
+    # always 0) would otherwise report "1 repeat" even when several runs were
+    # merged together, hiding the true per-cell sample count.
+    group_counts: dict[tuple[str, str, int], int] = {}
+    for cell in cells:
+        key = (cell["tier"], cell["client"], cell["concurrency"])
+        group_counts[key] = group_counts.get(key, 0) + 1
+    repeats = max(group_counts.values(), default=0)
     clients = sorted({cell["client"] for cell in cells})
     duration = config.get("duration_seconds")
     duration_text = f" · {format_number(duration, 0)}s measured windows" if duration else ""
@@ -537,13 +569,13 @@ def main() -> int:
     parser.add_argument("results_dirs", nargs="*", default=None,
                         help="One or more sweep run directories (cells are merged). "
                              "Defaults to newest under results/.")
-    parser.add_argument("--output", default="reports/sweep/index.html", help="Output HTML path.")
+    parser.add_argument("--output", default=str(ROOT / "reports/sweep/index.html"), help="Output HTML path.")
     args = parser.parse_args()
 
     if args.results_dirs:
         dirs = [Path(d) for d in args.results_dirs]
     else:
-        dirs = [find_latest_results_dir(Path("results"))]
+        dirs = [find_latest_results_dir(ROOT / "results")]
     output = write_report(dirs, Path(args.output))
     print(output)
     return 0

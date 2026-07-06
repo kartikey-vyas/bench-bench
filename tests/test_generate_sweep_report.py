@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import re
 import tempfile
@@ -133,6 +135,35 @@ class SweepReportTests(unittest.TestCase):
         self.assertIn("reason-a", html)          # stops unioned
         self.assertIn("reason-b", html)
         self.assertIn(">16<", html)              # cells from both runs present
+
+    def test_aggregate_cells_warns_on_disagreeing_configs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            write_cell(root, "eps500", 4, 0, "python", 0.99, ttfc=200)
+            write_cell(root, "eps500", 4, 1, "python", 0.97, ttfc=300)
+
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                groups = aggregate_cells(load_cells(root))
+
+        # Still aggregates rather than crashing.
+        self.assertIn(("eps500", "python", 4), groups)
+        warning = stderr.getvalue()
+        self.assertIn("ttfc_ms", warning)
+        self.assertIn("eps500", warning)
+        self.assertIn("python", warning)
+
+    def test_aggregate_cells_silent_when_configs_agree(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            write_cell(root, "eps500", 4, 0, "python", 0.99)
+            write_cell(root, "eps500", 4, 1, "python", 0.97)
+
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                aggregate_cells(load_cells(root))
+
+        self.assertEqual(stderr.getvalue(), "")
 
     def test_direct_labels_do_not_collide(self):
         with tempfile.TemporaryDirectory() as tmpdir:

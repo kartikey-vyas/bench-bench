@@ -2,7 +2,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use http_body_util::BodyExt;
-use server_rust::{app, app_with_stats, build_stream_plan, validate_request, ChatRequest, ServerStats};
+use server_rust::{
+    app, app_with_stats, build_stream_plan, validate_request, ChatRequest, ServerStats,
+};
 use tower::ServiceExt;
 
 fn request(chunks: usize, chunk_bytes: usize, ttfc_ms: u64, events_per_second: u64) -> ChatRequest {
@@ -54,7 +56,10 @@ fn stream_plan_derives_interval_and_ttfc() {
 fn batch_concatenates_role_and_content_events() {
     let plan = build_stream_plan(&request(4, 4, 0, 0)).unwrap();
     let batch = plan.batch(true, 2);
-    assert_eq!(batch.len(), plan.role_event.len() + 2 * plan.content_event.len());
+    assert_eq!(
+        batch.len(),
+        plan.role_event.len() + 2 * plan.content_event.len()
+    );
     let single = plan.batch(false, 1);
     assert_eq!(single, plan.content_event);
 }
@@ -63,7 +68,10 @@ fn batch_concatenates_role_and_content_events() {
 fn rejects_non_streaming_and_zero_chunk_bytes() {
     let mut non_streaming = request(1, 1, 0, 0);
     non_streaming.stream = false;
-    assert_eq!(validate_request(&non_streaming).unwrap_err(), "stream must be true");
+    assert_eq!(
+        validate_request(&non_streaming).unwrap_err(),
+        "stream must be true"
+    );
 
     let zero_bytes = request(1, 0, 0, 0);
     assert_eq!(
@@ -101,7 +109,11 @@ async fn unpaced_stream_returns_role_content_finish_done_in_order() {
     let text = std::str::from_utf8(&body).unwrap();
     let events: Vec<&str> = text.trim_end().split("\n\n").collect();
 
-    assert_eq!(events.len(), 6, "role + 3 content + finish + done, got {events:?}");
+    assert_eq!(
+        events.len(),
+        6,
+        "role + 3 content + finish + done, got {events:?}"
+    );
     assert!(events[0].contains("\"role\":\"assistant\""));
     for event in &events[1..4] {
         assert!(event.contains("\"content\":\"xxxx\""));
@@ -121,7 +133,10 @@ async fn paced_stream_takes_at_least_the_scheduled_duration() {
     let _ = response.into_body().collect().await.unwrap();
     let elapsed = started.elapsed();
     // Last content deadline is 50ms after the first; allow scheduler tolerance.
-    assert!(elapsed >= Duration::from_millis(45), "stream finished too fast: {elapsed:?}");
+    assert!(
+        elapsed >= Duration::from_millis(45),
+        "stream finished too fast: {elapsed:?}"
+    );
 }
 
 #[tokio::test]
@@ -138,10 +153,19 @@ async fn stats_endpoint_reports_and_resets_over_http() {
 
     let stats_response = router
         .clone()
-        .oneshot(http::Request::get("/stats").body(axum::body::Body::empty()).unwrap())
+        .oneshot(
+            http::Request::get("/stats")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
-    let body = stats_response.into_body().collect().await.unwrap().to_bytes();
+    let body = stats_response
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
     let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(value["requests_started"], 1);
     assert_eq!(value["requests_completed"], 1);
@@ -149,7 +173,11 @@ async fn stats_endpoint_reports_and_resets_over_http() {
 
     let reset = router
         .clone()
-        .oneshot(http::Request::post("/stats/reset").body(axum::body::Body::empty()).unwrap())
+        .oneshot(
+            http::Request::post("/stats/reset")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(reset.status(), http::StatusCode::NO_CONTENT);

@@ -106,6 +106,7 @@ def sdk_chunk(content):
 class FakeSdkStream:
     def __init__(self, chunks):
         self._chunks = chunks
+        self.closed = False
 
     def __aiter__(self):
         self._iter = iter(self._chunks)
@@ -117,10 +118,55 @@ class FakeSdkStream:
         except StopIteration:
             raise StopAsyncIteration
 
+    async def close(self):
+        self.closed = True
+
+
+class FakeSdkStreamRaisesMidStream:
+    """Like FakeSdkStream, but blows up partway through iteration — simulates
+    a decode/network error mid-stream so we can verify the stream is still
+    closed and the failure is reported as not-ok."""
+
+    def __init__(self, chunks, fail_after):
+        self._chunks = chunks
+        self._fail_after = fail_after
+        self.closed = False
+
+    def __aiter__(self):
+        self._iter = iter(self._chunks)
+        self._yielded = 0
+        return self
+
+    async def __anext__(self):
+        if self._yielded >= self._fail_after:
+            raise RuntimeError("boom mid-stream")
+        try:
+            value = next(self._iter)
+        except StopIteration:
+            raise StopAsyncIteration
+        self._yielded += 1
+        return value
+
+    async def close(self):
+        self.closed = True
+
 
 class FakeSdkClient:
     def __init__(self, chunks):
         stream = FakeSdkStream(chunks)
+        self.stream = stream
+
+        async def create(**kwargs):
+            self.create_kwargs = kwargs
+            return stream
+
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=create))
+
+
+class FakeSdkClientMidStreamFailure:
+    def __init__(self, chunks, fail_after):
+        stream = FakeSdkStreamRaisesMidStream(chunks, fail_after)
+        self.stream = stream
 
         async def create(**kwargs):
             self.create_kwargs = kwargs
@@ -141,6 +187,13 @@ class OpenAiClientTests(unittest.TestCase):
         self.assertEqual(extra["chunks"], 2)
         self.assertEqual(extra["request_id"], "python-openai-0-5")
 
+    def test_closes_stream_on_success(self):
+        chunks = [sdk_chunk(""), sdk_chunk("xxxx"), sdk_chunk(None)]
+        client = FakeSdkClient(chunks)
+        m = asyncio.run(openai_request(client, make_config(2), 0, 0))
+        self.assertTrue(m.ok)
+        self.assertTrue(client.stream.closed)
+
     def test_exception_marks_not_ok(self):
         class ExplodingClient:
             def __init__(self):
@@ -151,6 +204,13 @@ class OpenAiClientTests(unittest.TestCase):
         m = asyncio.run(openai_request(ExplodingClient(), make_config(2), 0, 0))
         self.assertFalse(m.ok)
         self.assertEqual(m.chunks, 0)
+
+    def test_closes_stream_when_iteration_raises_mid_stream(self):
+        chunks = [sdk_chunk(""), sdk_chunk("xxxx"), sdk_chunk("xxxx"), sdk_chunk(None)]
+        client = FakeSdkClientMidStreamFailure(chunks, fail_after=2)
+        m = asyncio.run(openai_request(client, make_config(3), 0, 0))
+        self.assertFalse(m.ok)
+        self.assertTrue(client.stream.closed)
 
 
 if __name__ == "__main__":
