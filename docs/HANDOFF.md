@@ -42,8 +42,10 @@ make setup                                 # or: uv sync, if toolchains exist
 #     (server 8 cores is plenty; give clients the rest; avoid SMT siblings
 #      crossing the two sets if possible)
 #   server_worker_threads: = number of server cores
-.venv/bin/python scripts/run_sweep.py --config config/sweep.linux.json
-.venv/bin/python scripts/generate_sweep_report.py    # newest run; pass several dirs to merge
+make sweep CONFIG=config/sweep.linux.json      # or: uv run bench-sweep --config …
+make sweep-report                              # or: uv run bench-sweep-report <dirs…>
+# (sweep code lives in bench_harness/sweep.py + sweep_report.py;
+#  scripts/run_sweep.py and scripts/generate_sweep_report.py are compat shims)
 ```
 
 Notes:

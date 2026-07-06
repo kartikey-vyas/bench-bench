@@ -190,13 +190,20 @@ Run the full tier × concurrency sweep (builds all binaries, starts the server,
 runs every client per cell, records server schedule-slip stats and CPU):
 
 ```bash
-make sweep          # full sweep, hours — tune config/sweep.default.json
-make sweep-smoke    # 2-minute end-to-end sanity sweep
-make sweep-report   # writes reports/sweep/index.html from the newest run
+make sweep                                    # config/sweep.default.json
+make sweep CONFIG=config/sweep.linux.json     # any sweep profile
+make sweep-smoke                              # 30s end-to-end sanity sweep
+make sweep-report                             # report from the newest run
+make sweep-report RUNS="results/<a> results/<b>"   # merge several runs
 ```
 
-`generate_sweep_report.py` also accepts several run directories and merges
-them into one report: `python scripts/generate_sweep_report.py results/<a> results/<b>`.
+The same commands are installed into the venv by `uv sync` as console
+scripts, for use without make:
+
+```bash
+uv run bench-sweep --config config/sweep.linux.json
+uv run bench-sweep-report results/<a> results/<b>
+```
 
 ### CPU allocation (dedicated-machine runs)
 

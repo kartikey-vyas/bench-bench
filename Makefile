@@ -20,14 +20,19 @@ smoke:
 compare:
 	$(PYTHON) scripts/compare_results.py results
 
+# Override per run: make sweep CONFIG=config/sweep.linux.json
+CONFIG ?= config/sweep.default.json
+# Optional run dirs to merge: make sweep-report RUNS="results/<a> results/<b>"
+RUNS ?=
+
 sweep:
-	$(PYTHON) scripts/run_sweep.py --config config/sweep.default.json
+	$(PYTHON) -m bench_harness.sweep --config $(CONFIG)
 
 sweep-smoke:
-	$(PYTHON) scripts/run_sweep.py --config config/sweep.smoke.json
+	$(PYTHON) -m bench_harness.sweep --config config/sweep.smoke.json
 
 sweep-report:
-	$(PYTHON) scripts/generate_sweep_report.py
+	$(PYTHON) -m bench_harness.sweep_report $(RUNS)
 
 setup:
 	bash scripts/setup.sh
