@@ -15,6 +15,9 @@ from bench_harness import clients as client_registry
 # client registry: bench_harness/clients.py. Labels here are still computed
 # from language+implementation at render time (see implementation_label), so
 # they read the same as before the registry existed.
+# NOTE (intentional change with the registry): this report historically listed
+# drain last while the sweep report listed it first; both now follow the one
+# canonical registry order (drain first, as the reference baseline).
 RUN_DIR_RE = re.compile(r"^\d{8}T\d{6}Z$")
 
 IMPLEMENTATION_ORDER = {

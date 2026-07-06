@@ -90,6 +90,16 @@ class DeferredClientTests(unittest.TestCase):
         self.assertFalse(m.ok)
         self.assertEqual(m.chunks, 3)
 
+    def test_past_window_clamps_window_chunks_to_zero(self):
+        # window_end in the past: every frame arrives outside the window, so
+        # the frame-granular clamp min(chunks, in_window_boundaries) must give
+        # 0 while the deferred decode still counts the full stream.
+        pieces = stream_bytes(3, "xxxx")
+        m = asyncio.run(deferred_request(FakeHttpxClient(pieces), make_config(3), 0, 0, 0.0))
+        self.assertTrue(m.ok)
+        self.assertEqual(m.chunks, 3)
+        self.assertEqual(m.window_chunks, 0)
+
     def test_split_boundary_across_reads(self):
         pieces = stream_bytes(2, "xxxx")
         blob = b"".join(pieces)

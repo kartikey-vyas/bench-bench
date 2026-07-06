@@ -93,6 +93,7 @@ def command(
         raise ValueError(f"unknown client {name!r}; known clients are {sorted(CLIENTS)}")
 
     if spec.kind == "python":
+        assert spec.module is not None, f"python client {name!r} missing module"
         return [
             python_executable, "-m", spec.module,
             "--config", str(config_path), "--output-dir", str(out_dir),
@@ -100,6 +101,7 @@ def command(
     if spec.kind == "go":
         return [str(binaries["go"]), "--config", str(config_path), "--output-dir", str(out_dir)]
     # rust
+    assert spec.rust_kind is not None, f"rust client {name!r} missing rust_kind"
     return [
         str(binaries["rust"]),
         "--config", str(config_path), "--output-dir", str(out_dir),
