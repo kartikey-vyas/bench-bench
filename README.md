@@ -20,6 +20,16 @@ This repo is a local benchmark demo for comparing Python, Go, and Rust harness o
 
 ## Setup
 
+One-shot toolchain bootstrap (installs rustup, Go ≥ 1.22, uv, the Python
+venv, and taskset on Linux — idempotent, only installs what's missing;
+detects macOS vs Linux):
+
+```bash
+make setup
+```
+
+Or just create the Python venv if the toolchains are already present:
+
 ```bash
 uv sync
 ```

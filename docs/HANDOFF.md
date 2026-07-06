@@ -33,10 +33,10 @@ Full design + contracts (wire protocol, 25-key summary schema, aggregation rules
 
 ## Runbook: dedicated Linux machine
 
-Prereqs: Rust stable, Go 1.22+, Python 3.12+, `uv`, `taskset` (util-linux — present on virtually every distro).
+Prereqs: Rust stable, Go 1.22+, Python 3.12+, `uv`, `taskset` (util-linux — present on virtually every distro). `make setup` bootstraps all of them (idempotent, macOS/Linux aware; distro Go older than 1.22 aborts with tarball instructions).
 
 ```bash
-uv sync                                    # creates .venv with httpx
+make setup                                 # or: uv sync, if toolchains exist
 # EDIT config/sweep.linux.json first:
 #   server_cpus / client_cpus: disjoint core lists matching the machine
 #     (server 8 cores is plenty; give clients the rest; avoid SMT siblings

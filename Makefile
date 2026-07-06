@@ -1,6 +1,6 @@
 PYTHON := $(shell test -x .venv/bin/python && echo .venv/bin/python || echo python3)
 
-.PHONY: test test-python test-go test-rust smoke compare sweep sweep-smoke sweep-report
+.PHONY: setup test test-python test-go test-rust smoke compare sweep sweep-smoke sweep-report
 
 test: test-python test-go test-rust
 
@@ -28,3 +28,6 @@ sweep-smoke:
 
 sweep-report:
 	$(PYTHON) scripts/generate_sweep_report.py
+
+setup:
+	bash scripts/setup.sh
