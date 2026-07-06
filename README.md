@@ -1,126 +1,101 @@
 # LLM Harness Overhead Benchmark
 
-This repo measures how faithfully seven streaming clients — the official OpenAI Python SDK (`python-openai`), a minimal hand-rolled Python/httpx client (`python`), a raw-byte-then-decode Python variant (`python-deferred`), Go/`net-http` (`go`), Rust/reqwest (`rust-reqwest`), Rust/hyper (`rust-hyper`), and a parse-free reference (`drain`) — represent a paced synthetic OpenAI-style SSE server. A Rust Axum server emits deterministic, precisely-timed chat-completion chunks (no real model call), so each client's reported throughput and latency reflect its own request scheduling, SSE parsing, and aggregation overhead rather than model inference. The goal is to find where, across a concurrency × token-rate grid, each client's measurements start to distort what the server actually delivered — the point where the measurement instrument itself becomes the bottleneck. `bench_harness.sweep` walks that grid per client with stop rules, and `bench_harness.sweep_report` renders efficiency-vs-concurrency curves showing each client's knee.
+This repo measures client-side overhead in streaming LLM benchmarks. It does not call a real model: a Rust synthetic server emits deterministic OpenAI-style SSE chat-completion chunks on a controlled schedule, and each client reports what it observed.
 
-**Operating this benchmark? Start with [docs/HANDOFF.md](docs/HANDOFF.md)** — production context, interpretation rules, and the dedicated-machine runbook.
+The question is: **at what concurrency does the measurement client stop faithfully representing what the server delivered?** If a real client falls behind while the parse-free reference keeps up, the measurement instrument has become the bottleneck.
+
+## Method
+
+- **Server:** Rust/Axum endpoint compatible with `POST /v1/chat/completions`, with benchmark fields for content chunk count, chunk size, TTFC, and per-stream event rate.
+- **Pacing:** events are scheduled against absolute deadlines. A slow client may receive coalesced bursts, but the server does not intentionally stretch the stream.
+- **Clients:** closed-loop workers run for a fixed measurement window. Each worker starts a new stream after its previous stream completes.
+- **Sweep:** `bench_harness.sweep` walks tier x concurrency x repeat x client cells, captures server slip and CPU stats, and stops escalation once a client clearly falls behind.
+- **Report:** `bench_harness.sweep_report` renders static HTML/SVG efficiency-vs-concurrency curves.
+
+Efficiency is normalized against the achievable closed-loop ideal for the workload:
+
+```text
+efficiency = observed chunks/sec / achievable closed-loop chunks/sec
+```
+
+Near `1.0` means the client kept up with the server schedule. A low value means the client observed fewer chunks than an ideal closed-loop client could have observed for the same concurrency, TTFC, and pacing rate.
+
+## Clients
+
+Known clients are defined in `bench_harness/clients.py`.
+
+| Name | Purpose |
+| --- | --- |
+| `drain` | Rust/hyper raw-byte drain; parse-free transport reference. |
+| `python-openai` | Official OpenAI Python SDK, single process. |
+| `python-openai-mp` | Official OpenAI Python SDK across 12 worker processes. |
+| `python` | Minimal Python/httpx async SSE parser with inline decode. |
+| `python-deferred` | Python/httpx raw-byte hot path, decode after stream close. |
+| `python-deferred-mp` | Deferred Python client across 12 worker processes. |
+| `go` | Go `net/http` client. |
+| `rust-reqwest` | Rust/Tokio client using reqwest. |
+| `rust-hyper` | Rust/Tokio client using lower-level Hyper. |
+
+The canonical experiment uses a focused subset: `drain`, `python-openai`, `python-openai-mp`, `python-deferred`, `python-deferred-mp`, `go`, and `rust-hyper`.
 
 ## Layout
 
-- `server-rust/`: Rust Axum synthetic OpenAI-style streaming server.
-- `bench_harness/`: Python config, SSE parser, metrics, sweep runner/report, and the Python client variants — `python` (minimal httpx, inline decode), `python-openai` (official OpenAI SDK, the production-style baseline; pacing fields ride in `extra_body`), `python-deferred` (raw-byte hot path with per-event timestamps, full decode after the stream closes — the measurement-harness strategy), plus `python-openai-mp` / `python-deferred-mp` (`python_mp.py`: the same stacks fanned across 12 worker processes, mirroring production multiprocessing).
-- `go-client/`: Go benchmark client using the standard `net/http` stack.
-- `rust-client/`: Rust benchmark client using Tokio with selectable `reqwest`, lower-level Hyper, and `drain` (parse-free reference) paths.
-- `config/`: shared workload and sweep JSON files.
-- `scripts/`: smoke runner, result comparison table, static report generators, and thin back-compat shims for the sweep runner/report (the real implementations live in `bench_harness/`).
-
-## Prerequisites
-
-- Python 3.12+
-- `uv` for Python dependency setup, or another way to install `httpx`
-- Go 1.22+
-- Rust stable with `cargo`
+| Path | Contents |
+| --- | --- |
+| `server-rust/` | Synthetic OpenAI-style streaming server. |
+| `bench_harness/` | Python config, metrics, parser, sweep runner/report, and Python clients. |
+| `go-client/` | Go client. |
+| `rust-client/` | Rust `reqwest`, `hyper`, and `drain` clients. |
+| `config/` | Workload and sweep JSON profiles. |
+| `scripts/` | Setup, smoke, comparison, report, and compatibility scripts. |
+| `docs/HANDOFF.md` | Operational handoff and dedicated-machine runbook context. |
+| `docs/CONTRACTS.md` | Wire protocol and summary-schema source of truth. |
 
 ## Setup
 
-One-shot toolchain bootstrap (installs rustup, Go ≥ 1.22, uv, the Python
-venv, and taskset on Linux — idempotent, only installs what's missing;
-detects macOS vs Linux):
+Prerequisites: Python 3.12+, `uv`, Go 1.22+, Rust stable, and `taskset` on Linux if using CPU pinning.
 
 ```bash
-make setup
+make setup   # installs missing toolchains and syncs the Python venv
+uv sync      # Python deps only, if toolchains already exist
 ```
 
-Or just create the Python venv if the toolchains are already present:
+Run Python entry points through `uv run ...` or `.venv/bin/python ...`; a bare `python3` may not have `httpx`, `openai`, or `rich` installed.
+
+## Quick Start
 
 ```bash
-uv sync
+make test
+make sweep-smoke
+make sweep CONFIG=config/sweep.experiment.json
+make sweep-report
 ```
 
-Or install the Python dependency manually:
+`make sweep-report` reads the newest run by default and writes `reports/sweep/index.html`. Merge explicit run directories with:
 
 ```bash
-python3 -m pip install httpx
+make sweep-report RUNS="results/<run-a> results/<run-b>"
 ```
 
-The Python client depends on `httpx`, which is only installed in the project
-virtualenv, not the system `python3`. Always run the smoke and sweep runners
-with the project's Python (`uv run python scripts/run_sweep.py ...` or
-`.venv/bin/python scripts/run_sweep.py ...`) — running them with a bare
-`python3` will fail as soon as the Python client is invoked.
+## Canonical Experiment
 
-## Tests
+`config/sweep.experiment.json` is the primary comparison profile:
+
+| Setting | Value |
+| --- | --- |
+| Tier | `eps250`: 250 content events/sec per stream, 200ms server TTFC |
+| Concurrency | `64, 128, 256, 384, 512, 768, 1024` |
+| Window | 60s measured, 5s warmup |
+| Repeats | 2 |
+| Clients | `drain`, OpenAI SDK single/mp, deferred Python single/mp, Go, Rust Hyper |
+
+Run it with:
 
 ```bash
-make test-python
-make test-go
-make test-rust
+make sweep CONFIG=config/sweep.experiment.json
 ```
 
-The Python tests cover the shared SSE parser, workload/sweep config loaders, and metric aggregation. The Go and Rust tests cover their parser and percentile logic, plus Rust server event generation.
-
-## Concurrency Sweep
-
-This is the main event: a tier × concurrency sweep across all seven clients that finds each client's efficiency knee.
-
-Run the full sweep (builds all binaries, starts the server, runs every client
-per cell, records server schedule-slip stats and CPU):
-
-```bash
-make sweep CONFIG=config/sweep.experiment.json  # THE canonical comparison (see HANDOFF)
-make sweep                                    # config/sweep.default.json
-make sweep CONFIG=config/sweep.linux.json     # any sweep profile
-make sweep-smoke                              # ~1min end-to-end sanity sweep
-make sweep-report                             # report from the newest run
-make sweep-report RUNS="results/<a> results/<b>"   # merge several runs
-```
-
-On a terminal the sweep shows a live progress bar (spinner, current cell,
-completed/total with the denominator shrinking as stop rules prune, elapsed,
-ETA) with color-coded per-run results above it; in pipes/CI it automatically
-falls back to plain log lines. Override with `bench-sweep --display
-rich|plain|auto`. Each cell's client stdout/stderr is captured to
-`<cell>/client.log` rather than the console.
-
-The same commands are installed into the venv by `uv sync` as console
-scripts, for use without make:
-
-```bash
-uv run bench-sweep --config config/sweep.linux.json
-uv run bench-sweep-report results/<a> results/<b>
-```
-
-`scripts/run_sweep.py` and `scripts/generate_sweep_report.py` still work as
-thin compatibility shims around `bench_harness.sweep` and
-`bench_harness.sweep_report` — use whichever entry point is convenient.
-
-### Sweep config field reference
-
-Sweep configs are JSON in `config/` (e.g. `config/sweep.default.json`), validated on load by `SweepConfig.from_path` / `SweepConfig.validate`:
-
-| Field | Type | Meaning |
-| --- | --- | --- |
-| `tiers[].name` | string | Free-form label for a pacing profile; groups cells in the report (never merge runs whose tier names don't mean the same thing). |
-| `tiers[].events_per_second` | int ≥ 0 | Server pacing rate for content chunks in this tier; `0` = unpaced/max-speed. |
-| `tiers[].ttfc_ms` | int ≥ 0 | Server-side delay before the first SSE event, per tier. |
-| `concurrencies` | list of int, ascending, positive | The rungs of the sweep ladder; escalated in order until a client's stop rule trips. |
-| `clients` | list of string | Which clients to run this sweep; must be a subset of the known clients (`python`, `python-deferred`, `python-openai`, `go`, `rust-reqwest`, `rust-hyper`, `drain`). |
-| `duration_seconds` | float > 0 | Timed measurement window per cell, after warmup. |
-| `warmup_seconds` | float ≥ 0 | Discarded ramp-up time before the timed window starts. |
-| `repeats` | int ≥ 1 | Repeats per (tier, concurrency, client) cell; aggregated in the report. |
-| `cooldown_seconds` | float ≥ 0 | Pause between concurrency rungs. |
-| `chunks_per_response` | int > 0 | Content chunks per streamed response. |
-| `chunk_bytes` | int > 0 | Bytes per content chunk. |
-| `stop_efficiency_below` | float | Escalation stops for a client/tier once mean efficiency drops below this. |
-| `stop_ttfc_excess_p95_ms` | float | Escalation stops once mean p95 TTFC exceeds `ttfc_ms` by more than this. |
-| `stop_failure_fraction` | float in [0, 1] | Escalation stops once the failed+incomplete fraction exceeds this. |
-| `server_worker_threads` | int > 0 or `null` | Caps the server's tokio runtime (`--worker-threads`); `null` = one worker per core. |
-| `server_cpus` | string or `null` | `taskset -c` core list for the server process (Linux only). |
-| `client_cpus` | string or `null` | `taskset -c` core list for every client process (Linux only); keep disjoint from `server_cpus`. |
-
-### CPU allocation (dedicated-machine runs)
-
-`server_worker_threads` / `server_cpus` / `client_cpus` control CPU placement so the server and the
-client under test don't compete for cores:
+On a dedicated Linux box, set disjoint server/client core lists before running:
 
 ```json
 {
@@ -130,62 +105,73 @@ client under test don't compete for cores:
 }
 ```
 
-`server_cpus` / `client_cpus`: Linux only — on macOS (no `taskset`) the sweep
-warns once and runs unpinned. Match these to your machine's topology and
-keep the two sets disjoint.
+CPU pinning uses `taskset`; on macOS the sweep warns once and runs unpinned.
 
-`config/sweep.linux.json` is a ready profile for a dedicated Linux box: the
-fine-grained ladder (1–1024 with dense rungs from 64 up), 3 repeats, 15s
-windows, and an 8-core server / 8-core client split — adjust the core lists
-to the actual core count before running.
-
-The Makefile auto-selects `.venv/bin/python` when present, falling back to
-`python3` otherwise; if you invoke `scripts/run_sweep.py` directly (bypassing
-`make`), use the project venv's Python as noted in Setup, or the sweep will
-fail fast with a preflight error when the `python` client is configured.
-
-Per (tier, client), concurrency escalation stops when failures exceed
-`stop_failure_fraction`, mean efficiency drops below `stop_efficiency_below`,
-or mean p95 TTFC excess exceeds `stop_ttfc_excess_p95_ms` — the stopping
-concurrency is that client's knee for the tier, listed in the report and in
-`results/<run>/sweep.json`.
-
-The `drain` client reads raw bytes without SSE/JSON parsing: it calibrates the
-ceiling. If drain holds efficiency ≈ 1.0 at a concurrency where a real client
-does not, the gap is client overhead, not the server. Cross-check
-`server_stats.json` (schedule slip) and `cpu.json` per cell before attributing
-a knee to the client — on one machine, a saturated client can starve the server.
-
-- Closed-loop cells quantize at low event rates: with long streams and short
-  windows each worker completes only a few requests, and the tail (waiting
-  for the last in-flight request) slightly deflates aggregate events/sec.
-  Prefer longer `duration_seconds` for low-rate tiers.
-
-## Reports
-
-Two report generators, both static HTML/SVG with no JS frameworks:
-
-- `bench_harness.sweep_report` (`make sweep-report`) — the efficiency-vs-concurrency sweep report described above; output defaults to `reports/sweep/index.html`.
-- `scripts/generate_report.py` — a single-run report comparing whichever clients wrote summaries into one result directory:
+## Sweep Commands
 
 ```bash
-uv run python scripts/generate_report.py
-open reports/latest/index.html
+make sweep CONFIG=config/sweep.default.json
+make sweep CONFIG=config/sweep.linux.json
+make sweep-smoke
+make sweep-report
+uv run bench-sweep --config config/sweep.default.json
+uv run bench-sweep-report results/<run-a> results/<run-b>
 ```
 
-```bash
-uv run python scripts/generate_report.py results/20260629T141233Z --output reports/latest/index.html
-open reports/latest/index.html
+`scripts/run_sweep.py` and `scripts/generate_sweep_report.py` remain compatibility shims. Interactive sweeps show rich progress; pipes/CI use plain logs. Override with `--display rich|plain|auto`. Each cell captures client output in `<cell>/client.log`.
+
+## Interpreting Results
+
+Use `drain` as the transport reference.
+
+- Client efficiency drops while `drain` stays near `1.0`: likely client overhead.
+- `drain` drops too: server, OS, or machine saturation; do not attribute that point to a client.
+- p95 TTFC excess indicates admission delay or event-loop scheduling delay before the first parsed event.
+- stream stretch greater than `1.0` means streams arrived slower than the configured pacing schedule.
+- failures or incomplete requests at high concurrency may be environmental; inspect cell logs.
+
+Always cross-check `server_stats.json` and `cpu.json` before drawing conclusions. Generated findings should live in HTML reports, not this README.
+
+## Sweep Config Reference
+
+Sweep configs are JSON files under `config/`.
+
+| Field | Meaning |
+| --- | --- |
+| `tiers[].name` | Report grouping label; do not merge runs whose tier names mean different things. |
+| `tiers[].events_per_second` | Content pacing rate per stream; `0` means unpaced/max-speed. |
+| `tiers[].ttfc_ms` | Server delay before the first SSE event. |
+| `concurrencies` | Ascending concurrency ladder. |
+| `clients` | Client names from `bench_harness/clients.py`. |
+| `duration_seconds` / `warmup_seconds` | Measured window and discarded ramp-up time. |
+| `repeats` / `cooldown_seconds` | Repeats per cell and pause between rungs. |
+| `chunks_per_response` / `chunk_bytes` | Stream size. |
+| `stop_efficiency_below` | Stop escalating when mean efficiency falls below this value. |
+| `stop_ttfc_excess_p95_ms` | Stop escalating when p95 TTFC exceeds configured TTFC by more than this. |
+| `stop_failure_fraction` | Stop escalating when failed plus incomplete requests exceed this fraction. |
+| `server_worker_threads` | Optional Tokio worker-thread cap for the server. |
+| `server_cpus` / `client_cpus` | Optional Linux `taskset -c` core lists. |
+
+## Workload And Result Contract
+
+Each stream is requested with OpenAI-style chat-completion JSON plus pacing fields:
+
+```json
+{
+  "model": "synthetic",
+  "messages": [{"role": "user", "content": "benchmark"}],
+  "stream": true,
+  "chunks": 512,
+  "chunk_bytes": 8,
+  "ttfc_ms": 200,
+  "events_per_second": 500,
+  "request_id": "python-3-17"
+}
 ```
 
-Defaults to the newest run under `results/` if no directory is given. The report includes throughput charts, latency distribution charts, an efficiency/speedup table, and benchmark caveats. Generated reports are ignored by git by default.
+The server emits one role event, `chunks` content events, one finish event, then `data: [DONE]`. With `events_per_second: 0`, all events are due immediately.
 
-## Workloads and Result Shape
-
-- `config/workload.smoke.json`: tiny correctness-oriented workload.
-- `config/workload.default.json`: higher-throughput local workload for comparison runs.
-
-Workload fields:
+Single-cell workload configs use:
 
 ```json
 {
@@ -201,95 +187,34 @@ Workload fields:
 }
 ```
 
-- `duration_seconds` / `warmup_seconds`: each client runs a fixed-duration closed loop at the given `concurrency`; the first `warmup_seconds` of measurements are discarded before the timed window starts.
-- `ttfc_ms`: server-side delay before it emits the first SSE event of a response (simulates model "time to first token").
-- `events_per_second`: server pacing rate for chunks after the first one. `0` means the server streams as fast as it can (no pacing) — used by the `max` tier in `config/sweep.default.json`.
-- Every response is one SSE stream: a role chunk, then `chunks_per_response` content chunks of `chunk_bytes` bytes each, then a finish chunk, then a `[DONE]` sentinel.
+Each client writes `summary.json` with the same envelope: `language`, `implementation`, `started_at`, `config`, and `summary`. The summary contains request counts, chunk/byte totals, request latency percentiles, TTFC percentiles, max inter-event gap percentiles, stream-stretch percentiles, closed-loop ideal throughput, and efficiency.
 
-Each client writes `summary.json`:
+Important aggregation rules:
 
-```json
-{
-  "language": "rust",
-  "implementation": "reqwest-tokio",
-  "started_at": "2026-06-29T00:00:00Z",
-  "config": {
-    "base_url": "http://127.0.0.1:8080",
-    "duration_seconds": 20.0,
-    "warmup_seconds": 3.0,
-    "concurrency": 64,
-    "chunks_per_response": 512,
-    "chunk_bytes": 8,
-    "ttfc_ms": 200,
-    "events_per_second": 500,
-    "output_dir": "results"
-  },
-  "summary": {
-    "duration_ms": 20000.4,
-    "successful_requests": 5142,
-    "incomplete_requests": 0,
-    "failed_requests": 0,
-    "total_chunks": 2632704,
-    "total_bytes": 21061632,
-    "requests_per_second": 257.1,
-    "chunks_per_second": 25471.0,
-    "mean_request_latency_ms": 245.9,
-    "p50_request_latency_ms": 244.1,
-    "p95_request_latency_ms": 251.8,
-    "p99_request_latency_ms": 260.3,
-    "mean_time_to_first_chunk_ms": 200.4,
-    "p50_time_to_first_chunk_ms": 200.1,
-    "p95_time_to_first_chunk_ms": 201.9,
-    "p99_time_to_first_chunk_ms": 204.7,
-    "p50_max_gap_ms": 2.1,
-    "p95_max_gap_ms": 2.6,
-    "p99_max_gap_ms": 3.4,
-    "max_max_gap_ms": 4.0,
-    "p50_stream_stretch": 0.97,
-    "p95_stream_stretch": 1.01,
-    "p99_stream_stretch": 1.05,
-    "ideal_events_per_second": 26811.6,
-    "efficiency": 0.95
-  }
-}
+- `successful_requests` are complete streams; `incomplete_requests` finished but delivered fewer chunks than expected; `failed_requests` are transport or HTTP failures.
+- latency, TTFC, gap, and stretch percentiles are computed over successful complete requests.
+- `chunks_per_second` is clipped to the measured window so late straggler completion cannot dilute the aggregate.
+- `efficiency` is defined for paced tiers; unpaced tiers report `0.0` for ideal throughput and efficiency.
+
+`docs/CONTRACTS.md` is the source of truth when the wire protocol or summary schema changes.
+
+## Reports
+
+```bash
+make sweep-report
+uv run bench-sweep-report results/<run-a> results/<run-b>
+uv run python scripts/generate_report.py results/<run> --output reports/latest/index.html
 ```
 
-Notes on the less obvious `summary` fields:
+The sweep report renders efficiency-vs-concurrency charts grouped by tier. `scripts/generate_report.py` is for ad hoc single-run comparisons. Generated `results/` and `reports/` output is ignored by git.
 
-- `incomplete_requests`: requests that finished (no transport error) but delivered fewer than `chunks_per_response` content chunks — excluded from the latency/gap/stretch stats, and always distinct from `failed_requests` (transport/HTTP errors).
-- `p50/p95/p99/max_max_gap_ms`: percentiles of each request's largest inter-event gap, i.e. how "bursty" event delivery was within a stream.
-- `p50/p95/p99_stream_stretch`: each request's wall-clock stream duration divided by the ideal duration implied by `events_per_second`; `1.0` means the stream was paced exactly on schedule, `>1.0` means it ran slower than scheduled.
-- `ideal_events_per_second` / `efficiency`: the achievable closed-loop ideal throughput at this `concurrency` (accounting for `ttfc_ms` dead time before pacing starts) and the fraction of it the client actually achieved. `efficiency` near `1.0` means the client is keeping up with the server's schedule; a low value points to client-side overhead rather than the server.
-
-This normalized shape is the cross-language contract — see `docs/CONTRACTS.md` for the full wire protocol and aggregation rules.
-
-## Development utilities
-
-Ad hoc single-machine runs, useful while developing a client or debugging a specific cell, rather than the full sweep above.
-
-### Smoke run
-
-Run the full local smoke benchmark (use the project venv's Python so the
-Python client can import `httpx`):
+## Development Utilities
 
 ```bash
 uv run python scripts/run_smoke.py --config config/workload.smoke.json
-# or: .venv/bin/python scripts/run_smoke.py --config config/workload.smoke.json
-```
-
-The smoke runner starts the Rust synthetic server on `127.0.0.1:8080`, runs available clients, writes timestamped summaries under `results/`, asserts every client's `summary.json` shares the identical schema, and prints a comparison table.
-
-### Run clients manually
-
-```bash
-python3 -m bench_harness.python_client --config config/workload.smoke.json --output-dir results/manual/python
+uv run python -m bench_harness.python_client --config config/workload.smoke.json --output-dir results/manual/python
 cd go-client && go run . --config ../config/workload.smoke.json --output-dir ../results/manual/go
 cargo run --manifest-path rust-client/Cargo.toml --release -- --config config/workload.smoke.json --output-dir results/manual/rust-reqwest --client reqwest
 cargo run --manifest-path rust-client/Cargo.toml --release -- --config config/workload.smoke.json --output-dir results/manual/rust-hyper --client hyper
-```
-
-### Compare existing results
-
-```bash
-python3 scripts/compare_results.py results
+uv run python scripts/compare_results.py results
 ```
