@@ -5,9 +5,9 @@ This repo is a local benchmark demo for comparing Python, Go, and Rust harness o
 ## Layout
 
 - `server-rust/`: Rust Axum synthetic OpenAI-style streaming server.
-- `bench_harness/`: Python config, SSE parser, metrics, and async `httpx` client.
+- `bench_harness/`: Python config, SSE parser, metrics, sweep runner/report, and three Python client variants — `python` (minimal httpx, inline decode), `python-openai` (official OpenAI SDK, the production-style baseline; pacing fields ride in `extra_body`), and `python-deferred` (raw-byte hot path with per-event timestamps, full decode after the stream closes — the measurement-harness strategy).
 - `go-client/`: Go benchmark client using the standard `net/http` stack.
-- `rust-client/`: Rust benchmark client using Tokio with selectable `reqwest` and lower-level Hyper paths.
+- `rust-client/`: Rust benchmark client using Tokio with selectable `reqwest`, lower-level Hyper, and `drain` (parse-free reference) paths.
 - `config/`: shared workload and sweep JSON files.
 - `scripts/`: smoke runner, concurrency sweep runner, result comparison table, and report generators.
 

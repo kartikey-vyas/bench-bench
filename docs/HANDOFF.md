@@ -1,10 +1,37 @@
 # Handoff: paced streaming benchmark — dedicated-Linux run
 
-Last updated: 2026-07-06. State: all suites green (Python 37, Go, server-rust 8, rust-client 8), smoke sweep green end-to-end on macOS.
+Last updated: 2026-07-06. State: all suites green, 7-client smoke sweep green end-to-end on macOS.
+
+## Why this exists (production context)
+
+Artificial Analysis runs an LLM-provider benchmarking client in production:
+Python + the official OpenAI SDK, async event loops, multiprocessing. At high
+concurrency it bottlenecks — measured throughput lower and TTFT higher than
+the providers actually deliver — i.e. the measurement instrument distorts the
+measurement. Hypothesis under test: move all decode work off the hot path
+(timestamp raw events on arrival, decode after stream close) so streams are
+timed with minimal overhead.
+
+Goals:
+1. Repeatable benchmark that detects client-side bottlenecking.
+2. Compare the production setup against alternatives — see the client ladder.
+3. Readable report showing where each setup bottlenecks per (concurrency ×
+   tokens/sec) tier.
+
+The client ladder is a causal chain (each gap isolates one variable):
+`python-openai` (official SDK, inline pydantic decode — the production
+baseline) → `python` (minimal hand-rolled inline decode — SDK overhead) →
+`python-deferred` (raw-byte hot path, decode after close — the proposed fix)
+→ `go` / `rust-*` (compiled inline — runtime ceiling) → `drain` (parse-free —
+transport ceiling / theoretical max). NOTE: for this use case the client is a
+measurement instrument, not an application simulator — deferring decode is
+legitimate; the benchmark quantifies what each setup's timing distortion is.
+The key result to extract: does python-deferred track drain where
+python-openai collapses?
 
 ## What this repo does
 
-A Rust Axum server streams synthetic OpenAI-style SSE chat completions with exactly controlled timing (`ttfc_ms` delay before the first event, `events_per_second` per-request rate, deadline-based schedule with catch-up bursts). Five clients (python/httpx, go/net-http, rust-reqwest, rust-hyper, and `drain` — a parse-free reference that only counts bytes) run closed-loop workers for fixed wall-clock windows. `scripts/run_sweep.py` walks tier × concurrency × repeat × client cells with stop rules; `scripts/generate_sweep_report.py` renders efficiency-vs-concurrency charts. Goal: find the concurrency at which each client stops faithfully representing the server ("knee").
+A Rust Axum server streams synthetic OpenAI-style SSE chat completions with exactly controlled timing (`ttfc_ms` delay before the first event, `events_per_second` per-request rate, deadline-based schedule with catch-up bursts). Seven clients (python-openai/official SDK, python/httpx, python-deferred/raw-bytes-then-decode, go/net-http, rust-reqwest, rust-hyper, and `drain` — a parse-free reference that only counts bytes) run closed-loop workers for fixed wall-clock windows. The OpenAI SDK client passes the server's pacing fields via `extra_body`, so the SDK speaks to the synthetic server unmodified. `scripts/run_sweep.py` walks tier × concurrency × repeat × client cells with stop rules; `scripts/generate_sweep_report.py` renders efficiency-vs-concurrency charts. Goal: find the concurrency at which each client stops faithfully representing the server ("knee").
 
 Full design + contracts (wire protocol, 25-key summary schema, aggregation rules, amended efficiency ideal): `docs/superpowers/plans/2026-07-03-paced-streaming-sweep.md` — the **Shared Contracts** section is the source of truth. Efficiency = observed events/s ÷ achievable closed-loop ideal = `concurrency × chunks / (ttfc + (chunks−1)/rate)`.
 

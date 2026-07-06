@@ -287,10 +287,19 @@ def server_command(sweep: SweepConfig, binaries: dict[str, Path], bind: str) -> 
     return command
 
 
+# Python client variants: sweep name -> (module, required imports).
+PYTHON_VARIANTS = {
+    "python": ("bench_harness.python_client", ("httpx",)),
+    "python-deferred": ("bench_harness.python_deferred_client", ("httpx",)),
+    "python-openai": ("bench_harness.python_openai_client", ("httpx", "openai")),
+}
+
+
 def client_command(name: str, binaries: dict[str, Path], config_path: Path, out_dir: Path) -> list[str]:
-    if name == "python":
+    if name in PYTHON_VARIANTS:
+        module, _ = PYTHON_VARIANTS[name]
         return [
-            sys.executable, "-m", "bench_harness.python_client",
+            sys.executable, "-m", module,
             "--config", str(config_path), "--output-dir", str(out_dir),
         ]
     if name == "go":
@@ -369,14 +378,24 @@ def write_sweep_record(run_dir: Path, record: dict[str, Any]) -> None:
     (run_dir / "sweep.json").write_text(json.dumps(record, indent=2) + "\n")
 
 
-def python_client_ready() -> bool:
-    """Check whether the running interpreter (used to launch the python client
-    subprocess via sys.executable) has httpx importable."""
+def python_client_ready(module: str = "httpx") -> bool:
+    """Check whether the running interpreter (used to launch python client
+    subprocesses via sys.executable) can import the given module."""
     result = subprocess.run(
-        [sys.executable, "-c", "import httpx"],
+        [sys.executable, "-c", f"import {module}"],
         capture_output=True,
     )
     return result.returncode == 0
+
+
+def missing_python_modules(clients: tuple[str, ...]) -> list[str]:
+    required = {
+        module
+        for client in clients
+        for module in PYTHON_VARIANTS.get(client, ("", ()))[1]
+        if module
+    }
+    return sorted(module for module in required if not python_client_ready(module))
 
 
 def main() -> int:
@@ -388,11 +407,12 @@ def main() -> int:
 
     sweep = SweepConfig.from_path(ROOT / args.config)
 
-    if "python" in sweep.clients and not python_client_ready():
+    missing = missing_python_modules(sweep.clients)
+    if missing:
         print(
-            f"error: 'python' client requires httpx in the running interpreter "
-            f"({sys.executable}); run via .venv/bin/python or uv run, or remove "
-            f"'python' from clients",
+            f"error: python clients require {', '.join(missing)} in the running "
+            f"interpreter ({sys.executable}); run via .venv/bin/python or uv run "
+            f"(after `uv sync`), or remove the python clients from the config",
             file=sys.stderr,
         )
         return 2

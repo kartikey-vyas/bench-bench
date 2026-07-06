@@ -1,14 +1,55 @@
 {
   "base_url": "http://127.0.0.1:8080",
   "tiers": [
-    {"name": "eps100", "events_per_second": 100, "ttfc_ms": 200},
-    {"name": "eps250", "events_per_second": 250, "ttfc_ms": 200},
-    {"name": "eps500", "events_per_second": 500, "ttfc_ms": 200},
-    {"name": "eps1000", "events_per_second": 1000, "ttfc_ms": 200},
-    {"name": "max", "events_per_second": 0, "ttfc_ms": 0}
+    {
+      "name": "eps100",
+      "events_per_second": 100,
+      "ttfc_ms": 200
+    },
+    {
+      "name": "eps250",
+      "events_per_second": 250,
+      "ttfc_ms": 200
+    },
+    {
+      "name": "eps500",
+      "events_per_second": 500,
+      "ttfc_ms": 200
+    },
+    {
+      "name": "eps1000",
+      "events_per_second": 1000,
+      "ttfc_ms": 200
+    },
+    {
+      "name": "max",
+      "events_per_second": 0,
+      "ttfc_ms": 0
+    }
   ],
-  "concurrencies": [1, 4, 16, 64, 96, 128, 192, 256, 384, 512, 768, 1024],
-  "clients": ["drain", "python", "go", "rust-reqwest", "rust-hyper"],
+  "concurrencies": [
+    1,
+    4,
+    16,
+    64,
+    96,
+    128,
+    192,
+    256,
+    384,
+    512,
+    768,
+    1024
+  ],
+  "clients": [
+    "drain",
+    "python-openai",
+    "python",
+    "python-deferred",
+    "go",
+    "rust-reqwest",
+    "rust-hyper"
+  ],
   "duration_seconds": 10.0,
   "warmup_seconds": 2.0,
   "repeats": 2,

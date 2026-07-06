@@ -37,10 +37,17 @@ def run_command(command: list[str], cwd: Path = ROOT) -> int:
     return subprocess.run(command, cwd=cwd).returncode
 
 
-def python_client_has_dependencies() -> bool:
+PYTHON_CLIENTS = (
+    ("python", "bench_harness.python_client", ("httpx",)),
+    ("python-deferred", "bench_harness.python_deferred_client", ("httpx",)),
+    ("python-openai", "bench_harness.python_openai_client", ("httpx", "openai")),
+)
+
+
+def python_client_has_dependencies(modules: tuple[str, ...] = ("httpx",)) -> bool:
     return (
         subprocess.run(
-            [sys.executable, "-c", "import httpx"],
+            [sys.executable, "-c", ";".join(f"import {module}" for module in modules)],
             cwd=ROOT,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -71,20 +78,21 @@ def start_server(bind: str) -> subprocess.Popen[str]:
 def run_clients(config: Path, run_dir: Path) -> int:
     failures = 0
 
-    if python_client_has_dependencies():
-        failures += run_command(
-            [
-                sys.executable,
-                "-m",
-                "bench_harness.python_client",
-                "--config",
-                str(config),
-                "--output-dir",
-                str(run_dir / "python"),
-            ]
-        )
-    else:
-        print("skip python client: httpx is not installed for this interpreter")
+    for client_name, module, modules in PYTHON_CLIENTS:
+        if python_client_has_dependencies(modules):
+            failures += run_command(
+                [
+                    sys.executable,
+                    "-m",
+                    module,
+                    "--config",
+                    str(config),
+                    "--output-dir",
+                    str(run_dir / client_name),
+                ]
+            )
+        else:
+            print(f"skip {client_name} client: {'/'.join(modules)} not installed for this interpreter")
 
     if require_tool("go"):
         failures += run_command(

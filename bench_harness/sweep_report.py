@@ -17,9 +17,19 @@ CLIENT_STYLE = {
     "go": {"light": "#1baf7a", "dark": "#199e70", "dash": ""},
     "rust-reqwest": {"light": "#eda100", "dark": "#c98500", "dash": ""},
     "rust-hyper": {"light": "#008300", "dark": "#008300", "dash": ""},
+    "python-openai": {"light": "#4a3aa7", "dark": "#9085e9", "dash": ""},
+    "python-deferred": {"light": "#e34948", "dark": "#e66767", "dash": ""},
     "drain": {"light": "#898781", "dark": "#898781", "dash": "6 4"},
 }
-CLIENT_ORDER = ["drain", "python", "go", "rust-reqwest", "rust-hyper"]
+CLIENT_ORDER = [
+    "drain",
+    "python-openai",
+    "python",
+    "python-deferred",
+    "go",
+    "rust-reqwest",
+    "rust-hyper",
+]
 
 
 def find_latest_results_dir(root: Path) -> Path:
