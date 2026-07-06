@@ -5,14 +5,16 @@ from bench_harness.clients import CLIENTS, command, required_python_modules, sty
 
 
 class RegistryShapeTests(unittest.TestCase):
-    def test_exactly_seven_known_clients(self):
+    def test_exactly_nine_known_clients(self):
         self.assertEqual(
             set(CLIENTS),
             {
                 "drain",
                 "python-openai",
+                "python-openai-mp",
                 "python",
                 "python-deferred",
+                "python-deferred-mp",
                 "go",
                 "rust-reqwest",
                 "rust-hyper",
@@ -21,7 +23,7 @@ class RegistryShapeTests(unittest.TestCase):
 
     def test_orders_are_unique_and_contiguous(self):
         orders = sorted(spec.order for spec in CLIENTS.values())
-        self.assertEqual(orders, list(range(7)))
+        self.assertEqual(orders, list(range(9)))
 
     def test_every_spec_has_colors_and_summary_identity(self):
         for name, spec in CLIENTS.items():
@@ -44,6 +46,23 @@ class CommandTests(unittest.TestCase):
             argv,
             [
                 "/usr/bin/python3.12", "-m", "bench_harness.python_client",
+                "--config", "/cfg.json", "--output-dir", "/out",
+            ],
+        )
+
+    def test_python_mp_command_carries_variant_args(self):
+        argv = command(
+            "python-openai-mp",
+            binaries={},
+            config_path=Path("/cfg.json"),
+            out_dir=Path("/out"),
+            python_executable="/usr/bin/python3.12",
+        )
+        self.assertEqual(
+            argv,
+            [
+                "/usr/bin/python3.12", "-m", "bench_harness.python_mp",
+                "--variant", "openai",
                 "--config", "/cfg.json", "--output-dir", "/out",
             ],
         )

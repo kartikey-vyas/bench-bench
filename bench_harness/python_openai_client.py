@@ -103,7 +103,10 @@ async def run_one_request(
     return measurement(ok=True)
 
 
-async def run_benchmark(config: WorkloadConfig, output_dir: Path | None = None) -> dict[str, Any]:
+async def collect_measurements(config: WorkloadConfig) -> tuple[list[RequestMeasurement], float]:
+    """Warmup + measured closed-loop collection for one process. Shared by the
+    single-process entry point below and bench_harness.python_mp, which runs
+    this in each worker process with a slice of the total concurrency."""
     try:
         import httpx
         from openai import AsyncOpenAI
@@ -112,7 +115,6 @@ async def run_benchmark(config: WorkloadConfig, output_dir: Path | None = None) 
             "python-openai client requires the openai SDK. Run `uv sync`."
         ) from exc
 
-    started_at = datetime.now(timezone.utc)
     # Same pool sizing as the minimal python client so the SDK is not
     # handicapped by its default connection limits at high concurrency.
     http_client = httpx.AsyncClient(
@@ -131,9 +133,12 @@ async def run_benchmark(config: WorkloadConfig, output_dir: Path | None = None) 
     ) as client:
         if config.warmup_seconds > 0:
             await run_for(client, config, config.warmup_seconds, run_one_request)
-        measurements, duration_ms = await run_for(
-            client, config, config.duration_seconds, run_one_request
-        )
+        return await run_for(client, config, config.duration_seconds, run_one_request)
+
+
+async def run_benchmark(config: WorkloadConfig, output_dir: Path | None = None) -> dict[str, Any]:
+    started_at = datetime.now(timezone.utc)
+    measurements, duration_ms = await collect_measurements(config)
 
     result = {
         "language": LANGUAGE,

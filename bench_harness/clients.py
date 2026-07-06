@@ -1,4 +1,4 @@
-"""Single source of truth for the seven benchmark clients.
+"""Single source of truth for the benchmark clients.
 
 Every consumer that previously hard-coded client names, python modules,
 rust --client values, summary (language, implementation) identities, or
@@ -26,6 +26,7 @@ class ClientSpec:
     module: str | None = None     # python: module for `python -m`
     required_modules: tuple[str, ...] = ()  # python: import preflight
     rust_kind: str | None = None  # rust: --client value
+    extra_args: tuple[str, ...] = ()  # python: extra argv before --config
 
 
 CLIENTS: dict[str, ClientSpec] = {
@@ -42,33 +43,51 @@ CLIENTS: dict[str, ClientSpec] = {
         module="bench_harness.python_openai_client",
         required_modules=("httpx", "openai"),
     ),
+    # -mp variants share their parent's hue with a short dash: same stack,
+    # fanned out across worker processes (production deployment shape).
+    "python-openai-mp": ClientSpec(
+        name="python-openai-mp", kind="python", order=2,
+        language="python", implementation="asyncio-openai-sdk-mp12",
+        light="#4a3aa7", dark="#9085e9", dash="2 3",
+        module="bench_harness.python_mp",
+        required_modules=("httpx", "openai"),
+        extra_args=("--variant", "openai"),
+    ),
     "python": ClientSpec(
-        name="python", kind="python", order=2,
+        name="python", kind="python", order=3,
         language="python", implementation="asyncio-httpx",
         light="#2a78d6", dark="#3987e5",
         module="bench_harness.python_client",
         required_modules=("httpx",),
     ),
     "python-deferred": ClientSpec(
-        name="python-deferred", kind="python", order=3,
+        name="python-deferred", kind="python", order=4,
         language="python", implementation="asyncio-httpx-deferred",
         light="#e34948", dark="#e66767",
         module="bench_harness.python_deferred_client",
         required_modules=("httpx",),
     ),
+    "python-deferred-mp": ClientSpec(
+        name="python-deferred-mp", kind="python", order=5,
+        language="python", implementation="asyncio-httpx-deferred-mp12",
+        light="#e34948", dark="#e66767", dash="2 3",
+        module="bench_harness.python_mp",
+        required_modules=("httpx",),
+        extra_args=("--variant", "deferred"),
+    ),
     "go": ClientSpec(
-        name="go", kind="go", order=4,
+        name="go", kind="go", order=6,
         language="go", implementation="net-http-goroutines",
         light="#1baf7a", dark="#199e70",
     ),
     "rust-reqwest": ClientSpec(
-        name="rust-reqwest", kind="rust", order=5,
+        name="rust-reqwest", kind="rust", order=7,
         language="rust", implementation="reqwest-tokio",
         light="#eda100", dark="#c98500",
         rust_kind="reqwest",
     ),
     "rust-hyper": ClientSpec(
-        name="rust-hyper", kind="rust", order=6,
+        name="rust-hyper", kind="rust", order=8,
         language="rust", implementation="hyper-tokio",
         light="#008300", dark="#008300",
         rust_kind="hyper",
@@ -95,7 +114,7 @@ def command(
     if spec.kind == "python":
         assert spec.module is not None, f"python client {name!r} missing module"
         return [
-            python_executable, "-m", spec.module,
+            python_executable, "-m", spec.module, *spec.extra_args,
             "--config", str(config_path), "--output-dir", str(out_dir),
         ]
     if spec.kind == "go":

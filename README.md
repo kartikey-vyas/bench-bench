@@ -7,7 +7,7 @@ This repo measures how faithfully seven streaming clients — the official OpenA
 ## Layout
 
 - `server-rust/`: Rust Axum synthetic OpenAI-style streaming server.
-- `bench_harness/`: Python config, SSE parser, metrics, sweep runner/report, and three Python client variants — `python` (minimal httpx, inline decode), `python-openai` (official OpenAI SDK, the production-style baseline; pacing fields ride in `extra_body`), and `python-deferred` (raw-byte hot path with per-event timestamps, full decode after the stream closes — the measurement-harness strategy).
+- `bench_harness/`: Python config, SSE parser, metrics, sweep runner/report, and the Python client variants — `python` (minimal httpx, inline decode), `python-openai` (official OpenAI SDK, the production-style baseline; pacing fields ride in `extra_body`), `python-deferred` (raw-byte hot path with per-event timestamps, full decode after the stream closes — the measurement-harness strategy), plus `python-openai-mp` / `python-deferred-mp` (`python_mp.py`: the same stacks fanned across 12 worker processes, mirroring production multiprocessing).
 - `go-client/`: Go benchmark client using the standard `net/http` stack.
 - `rust-client/`: Rust benchmark client using Tokio with selectable `reqwest`, lower-level Hyper, and `drain` (parse-free reference) paths.
 - `config/`: shared workload and sweep JSON files.
@@ -66,9 +66,10 @@ Run the full sweep (builds all binaries, starts the server, runs every client
 per cell, records server schedule-slip stats and CPU):
 
 ```bash
+make sweep CONFIG=config/sweep.experiment.json  # THE canonical comparison (see HANDOFF)
 make sweep                                    # config/sweep.default.json
 make sweep CONFIG=config/sweep.linux.json     # any sweep profile
-make sweep-smoke                              # 30s end-to-end sanity sweep
+make sweep-smoke                              # ~1min end-to-end sanity sweep
 make sweep-report                             # report from the newest run
 make sweep-report RUNS="results/<a> results/<b>"   # merge several runs
 ```

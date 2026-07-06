@@ -14,8 +14,10 @@
   "clients": [
     "drain",
     "python-openai",
+    "python-openai-mp",
     "python",
     "python-deferred",
+    "python-deferred-mp",
     "go",
     "rust-reqwest",
     "rust-hyper"

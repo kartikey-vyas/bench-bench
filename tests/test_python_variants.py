@@ -235,5 +235,21 @@ class OpenAiClientTests(unittest.TestCase):
         self.assertTrue(client.stream.closed)
 
 
+class SplitConcurrencyTests(unittest.TestCase):
+    def test_even_split(self):
+        from bench_harness.python_mp import split_concurrency
+        self.assertEqual(split_concurrency(64, 4), [16, 16, 16, 16])
+
+    def test_uneven_split_distributes_remainder(self):
+        from bench_harness.python_mp import split_concurrency
+        self.assertEqual(split_concurrency(64, 12), [6, 6, 6, 6, 5, 5, 5, 5, 5, 5, 5, 5])
+        self.assertEqual(sum(split_concurrency(64, 12)), 64)
+
+    def test_fewer_slots_than_processes_never_yields_zero(self):
+        from bench_harness.python_mp import split_concurrency
+        self.assertEqual(split_concurrency(4, 12), [1, 1, 1, 1])
+        self.assertEqual(split_concurrency(1, 12), [1])
+
+
 if __name__ == "__main__":
     unittest.main()

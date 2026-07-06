@@ -140,7 +140,10 @@ async def run_one_request(
     )
 
 
-async def run_benchmark(config: WorkloadConfig, output_dir: Path | None = None) -> dict[str, Any]:
+async def collect_measurements(config: WorkloadConfig) -> tuple[list[RequestMeasurement], float]:
+    """Warmup + measured closed-loop collection for one process. Shared by the
+    single-process entry point below and bench_harness.python_mp, which runs
+    this in each worker process with a slice of the total concurrency."""
     try:
         import httpx
     except ImportError as exc:
@@ -148,7 +151,6 @@ async def run_benchmark(config: WorkloadConfig, output_dir: Path | None = None) 
             "python-deferred client requires httpx. Run `uv sync`."
         ) from exc
 
-    started_at = datetime.now(timezone.utc)
     timeout = httpx.Timeout(connect=10.0, read=None, write=10.0, pool=None)
     limits = httpx.Limits(
         max_connections=config.concurrency, max_keepalive_connections=config.concurrency
@@ -157,9 +159,12 @@ async def run_benchmark(config: WorkloadConfig, output_dir: Path | None = None) 
     async with httpx.AsyncClient(timeout=timeout, limits=limits) as client:
         if config.warmup_seconds > 0:
             await run_for(client, config, config.warmup_seconds, run_one_request)
-        measurements, duration_ms = await run_for(
-            client, config, config.duration_seconds, run_one_request
-        )
+        return await run_for(client, config, config.duration_seconds, run_one_request)
+
+
+async def run_benchmark(config: WorkloadConfig, output_dir: Path | None = None) -> dict[str, Any]:
+    started_at = datetime.now(timezone.utc)
+    measurements, duration_ms = await collect_measurements(config)
 
     result = {
         "language": LANGUAGE,

@@ -1,6 +1,28 @@
 # Handoff: paced streaming benchmark — dedicated-Linux run
 
-Last updated: 2026-07-06. State: all suites green, 7-client smoke sweep green end-to-end on macOS.
+Last updated: 2026-07-06. State: all suites green, 9-client smoke sweep green end-to-end on macOS.
+
+## THE canonical experiment (run this first)
+
+`config/sweep.experiment.json` — the agreed primary comparison:
+
+- Tier: **250 events/s per stream, 200ms TTFC** (eps250)
+- Concurrency ladder: **64, 128, 256, 384, 512, 768, 1024**
+- **60s measured windows**, 5s warmup, 2 repeats
+- Candidates: `python-openai` (production baseline, single process),
+  `python-openai-mp` (same, 12 worker processes — production deployment
+  shape), `python-deferred` (the fix hypothesis, single process),
+  `python-deferred-mp` (fix + 12 processes), `go`, `rust-hyper`, `drain`
+  (theoretical max)
+
+```bash
+make sweep CONFIG=config/sweep.experiment.json   # ≈ 2h ceiling, less with stops
+```
+
+The four python variants form a 2×2 (SDK vs deferred × single vs
+multiprocess): it separates "how much does deferral buy within one
+process" from "how much does process fan-out buy each stack". On Linux,
+add core pinning fields per the CPU-allocation section before running.
 
 ## Why this exists (production context)
 
@@ -23,11 +45,16 @@ The client ladder is a causal chain (each gap isolates one variable):
 baseline) → `python` (minimal hand-rolled inline decode — SDK overhead) →
 `python-deferred` (raw-byte hot path, decode after close — the proposed fix)
 → `go` / `rust-*` (compiled inline — runtime ceiling) → `drain` (parse-free —
-transport ceiling / theoretical max). NOTE: for this use case the client is a
-measurement instrument, not an application simulator — deferring decode is
-legitimate; the benchmark quantifies what each setup's timing distortion is.
-The key result to extract: does python-deferred track drain where
-python-openai collapses?
+transport ceiling / theoretical max). The `-mp` variants (`python-openai-mp`,
+`python-deferred-mp`, via `bench_harness/python_mp.py`) fan the same stacks
+across 12 worker processes, each with its own event loop over a slice of the
+total concurrency — the production deployment shape; window-clipped counting
+makes the cross-process aggregation exact. NOTE: for this use case the client
+is a measurement instrument, not an application simulator — deferring decode
+is legitimate; the benchmark quantifies what each setup's timing distortion
+is. The key results to extract: does python-deferred track drain where
+python-openai collapses, and how far does 12-way multiprocessing move each
+python knee?
 
 ## What this repo does
 

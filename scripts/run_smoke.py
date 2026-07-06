@@ -83,6 +83,7 @@ def run_clients(config: Path, run_dir: Path) -> int:
                     sys.executable,
                     "-m",
                     spec.module,
+                    *spec.extra_args,
                     "--config",
                     str(config),
                     "--output-dir",
