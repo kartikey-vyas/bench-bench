@@ -16,17 +16,20 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from bench_harness import clients as client_registry
+
 ROOT = Path(__file__).resolve().parents[1]
 
-# Python client variants: sweep name -> (module, required imports). Defined
-# ahead of SweepConfig so KNOWN_CLIENTS is available to SweepConfig.validate().
+# Client names, python modules, and rust --client mappings all live in the
+# registry (bench_harness/clients.py); KNOWN_CLIENTS is derived from it so
+# SweepConfig.validate() stays in sync with the registry automatically.
 PYTHON_VARIANTS = {
-    "python": ("bench_harness.python_client", ("httpx",)),
-    "python-deferred": ("bench_harness.python_deferred_client", ("httpx",)),
-    "python-openai": ("bench_harness.python_openai_client", ("httpx", "openai")),
+    name: (spec.module, spec.required_modules)
+    for name, spec in client_registry.CLIENTS.items()
+    if spec.kind == "python"
 }
 
-KNOWN_CLIENTS = set(PYTHON_VARIANTS) | {"go", "rust-reqwest", "rust-hyper", "drain"}
+KNOWN_CLIENTS = set(client_registry.CLIENTS)
 
 
 @dataclass(frozen=True)
@@ -399,22 +402,7 @@ def server_command(sweep: SweepConfig, binaries: dict[str, Path], bind: str) -> 
 
 
 def client_command(name: str, binaries: dict[str, Path], config_path: Path, out_dir: Path) -> list[str]:
-    if name in PYTHON_VARIANTS:
-        module, _ = PYTHON_VARIANTS[name]
-        return [
-            sys.executable, "-m", module,
-            "--config", str(config_path), "--output-dir", str(out_dir),
-        ]
-    if name == "go":
-        return [str(binaries["go"]), "--config", str(config_path), "--output-dir", str(out_dir)]
-    rust_kinds = {"rust-reqwest": "reqwest", "rust-hyper": "hyper", "drain": "drain"}
-    if name in rust_kinds:
-        return [
-            str(binaries["rust"]),
-            "--config", str(config_path), "--output-dir", str(out_dir),
-            "--client", rust_kinds[name],
-        ]
-    raise ValueError(f"unknown client {name!r}")
+    return client_registry.command(name, binaries, config_path, out_dir, sys.executable)
 
 
 def run_cell_client(
@@ -492,12 +480,7 @@ def python_client_ready(module: str = "httpx") -> bool:
 
 
 def missing_python_modules(clients: tuple[str, ...]) -> list[str]:
-    required = {
-        module
-        for client in clients
-        for module in PYTHON_VARIANTS.get(client, ("", ()))[1]
-        if module
-    }
+    required = client_registry.required_python_modules(clients)
     return sorted(module for module in required if not python_client_ready(module))
 
 

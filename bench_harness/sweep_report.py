@@ -9,35 +9,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from bench_harness import clients as client_registry
+
 ROOT = Path(__file__).resolve().parents[1]
 
 RUN_DIR_RE = re.compile(r"^\d{8}T\d{6}Z$")
 
-# NOTE: this palette/order duplicates IMPLEMENTATION_ORDER/IMPLEMENTATION_COLORS
-# in scripts/generate_report.py (the single-run report). No shared registry
-# yet — deferred until after the Linux sweep run; if you touch one, check
-# whether the other needs the same update.
-#
-# Reference dataviz palette, fixed slot order (validated for CVD separation).
-# Drain is the neutral reference, not a categorical slot.
-CLIENT_STYLE = {
-    "python": {"light": "#2a78d6", "dark": "#3987e5", "dash": ""},
-    "go": {"light": "#1baf7a", "dark": "#199e70", "dash": ""},
-    "rust-reqwest": {"light": "#eda100", "dark": "#c98500", "dash": ""},
-    "rust-hyper": {"light": "#008300", "dark": "#008300", "dash": ""},
-    "python-openai": {"light": "#4a3aa7", "dark": "#9085e9", "dash": ""},
-    "python-deferred": {"light": "#e34948", "dark": "#e66767", "dash": ""},
-    "drain": {"light": "#898781", "dark": "#898781", "dash": "6 4"},
-}
-CLIENT_ORDER = [
-    "drain",
-    "python-openai",
-    "python",
-    "python-deferred",
-    "go",
-    "rust-reqwest",
-    "rust-hyper",
-]
+# Client order and chart palette (slot order validated for CVD separation;
+# drain is the neutral reference, not a categorical slot) live in the single
+# client registry: bench_harness/clients.py. Unknown/legacy client names
+# (e.g. an old `rust-drain` result dir) fall back to a neutral style via
+# client_registry.style() rather than crashing.
+CLIENT_STYLE = {name: client_registry.style(name) for name in client_registry.CLIENT_ORDER}
+CLIENT_ORDER = list(client_registry.CLIENT_ORDER)
 
 
 def find_latest_results_dir(root: Path) -> Path:

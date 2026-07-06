@@ -11,6 +11,7 @@ from pathlib import Path
 from urllib.error import URLError
 from urllib.request import urlopen
 
+from bench_harness import clients as client_registry
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -36,13 +37,6 @@ def wait_for_health(url: str, timeout_seconds: float = 10.0) -> None:
 def run_command(command: list[str], cwd: Path = ROOT) -> int:
     print("+", " ".join(command))
     return subprocess.run(command, cwd=cwd).returncode
-
-
-PYTHON_CLIENTS = (
-    ("python", "bench_harness.python_client", ("httpx",)),
-    ("python-deferred", "bench_harness.python_deferred_client", ("httpx",)),
-    ("python-openai", "bench_harness.python_openai_client", ("httpx", "openai")),
-)
 
 
 def python_client_has_dependencies(modules: tuple[str, ...] = ("httpx",)) -> bool:
@@ -78,42 +72,52 @@ def start_server(bind: str) -> subprocess.Popen[str]:
 
 def run_clients(config: Path, run_dir: Path) -> int:
     failures = 0
+    ordered_specs = [client_registry.CLIENTS[name] for name in client_registry.CLIENT_ORDER]
 
-    for client_name, module, modules in PYTHON_CLIENTS:
-        if python_client_has_dependencies(modules):
+    for spec in ordered_specs:
+        if spec.kind != "python":
+            continue
+        if python_client_has_dependencies(spec.required_modules):
             failures += run_command(
                 [
                     sys.executable,
                     "-m",
-                    module,
+                    spec.module,
                     "--config",
                     str(config),
                     "--output-dir",
-                    str(run_dir / client_name),
+                    str(run_dir / spec.name),
                 ]
             )
         else:
-            print(f"skip {client_name} client: {'/'.join(modules)} not installed for this interpreter")
+            print(
+                f"skip {spec.name} client: "
+                f"{'/'.join(spec.required_modules)} not installed for this interpreter"
+            )
 
     if require_tool("go"):
-        failures += run_command(
-            [
-                "go",
-                "run",
-                ".",
-                "--config",
-                str(config),
-                "--output-dir",
-                str(run_dir / "go"),
-            ],
-            cwd=ROOT / "go-client",
-        )
+        for spec in ordered_specs:
+            if spec.kind != "go":
+                continue
+            failures += run_command(
+                [
+                    "go",
+                    "run",
+                    ".",
+                    "--config",
+                    str(config),
+                    "--output-dir",
+                    str(run_dir / spec.name),
+                ],
+                cwd=ROOT / "go-client",
+            )
     else:
         print("skip go client: go is not installed")
 
     if require_tool("cargo"):
-        for client_name in ("reqwest", "hyper", "drain"):
-            out_name = "drain" if client_name == "drain" else f"rust-{client_name}"
+        for spec in ordered_specs:
+            if spec.kind != "rust":
+                continue
             failures += run_command(
                 [
                     "cargo",
@@ -125,9 +129,9 @@ def run_clients(config: Path, run_dir: Path) -> int:
                     "--config",
                     str(config),
                     "--output-dir",
-                    str(run_dir / out_name),
+                    str(run_dir / spec.name),
                     "--client",
-                    client_name,
+                    spec.rust_kind,
                 ]
             )
     else:

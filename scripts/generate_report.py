@@ -9,31 +9,22 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from bench_harness import clients as client_registry
 
-# NOTE: this order/color mapping duplicates CLIENT_ORDER/CLIENT_STYLE in
-# bench_harness/sweep_report.py (the concurrency-sweep report). No shared
-# registry yet — deferred until after the Linux sweep run; if you touch one,
-# check whether the other needs the same update.
+# Client order and colors (by (language, implementation)) live in the single
+# client registry: bench_harness/clients.py. Labels here are still computed
+# from language+implementation at render time (see implementation_label), so
+# they read the same as before the registry existed.
 RUN_DIR_RE = re.compile(r"^\d{8}T\d{6}Z$")
 
 IMPLEMENTATION_ORDER = {
-    ("python", "asyncio-openai-sdk"): 0,
-    ("python", "asyncio-httpx"): 1,
-    ("python", "asyncio-httpx-deferred"): 2,
-    ("go", "net-http-goroutines"): 3,
-    ("rust", "reqwest-tokio"): 4,
-    ("rust", "hyper-tokio"): 5,
-    ("rust", "drain-hyper"): 6,
+    (spec.language, spec.implementation): spec.order
+    for spec in client_registry.CLIENTS.values()
 }
 
 IMPLEMENTATION_COLORS = {
-    "Python asyncio-openai-sdk": "#4a3aa7",
-    "Python asyncio-httpx": "#2a78d6",
-    "Python asyncio-httpx-deferred": "#e34948",
-    "Go net-http-goroutines": "#1baf7a",
-    "Rust reqwest-tokio": "#eda100",
-    "Rust hyper-tokio": "#008300",
-    "Rust drain-hyper": "#898781",
+    f"{spec.language.title()} {spec.implementation}": spec.light
+    for spec in client_registry.CLIENTS.values()
 }
 
 
