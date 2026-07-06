@@ -1,0 +1,60 @@
+# Handoff: paced streaming benchmark — dedicated-Linux run
+
+Last updated: 2026-07-06. State: all suites green (Python 37, Go, server-rust 8, rust-client 8), smoke sweep green end-to-end on macOS.
+
+## What this repo does
+
+A Rust Axum server streams synthetic OpenAI-style SSE chat completions with exactly controlled timing (`ttfc_ms` delay before the first event, `events_per_second` per-request rate, deadline-based schedule with catch-up bursts). Five clients (python/httpx, go/net-http, rust-reqwest, rust-hyper, and `drain` — a parse-free reference that only counts bytes) run closed-loop workers for fixed wall-clock windows. `scripts/run_sweep.py` walks tier × concurrency × repeat × client cells with stop rules; `scripts/generate_sweep_report.py` renders efficiency-vs-concurrency charts. Goal: find the concurrency at which each client stops faithfully representing the server ("knee").
+
+Full design + contracts (wire protocol, 25-key summary schema, aggregation rules, amended efficiency ideal): `docs/superpowers/plans/2026-07-03-paced-streaming-sweep.md` — the **Shared Contracts** section is the source of truth. Efficiency = observed events/s ÷ achievable closed-loop ideal = `concurrency × chunks / (ttfc + (chunks−1)/rate)`.
+
+## Interpretation rules (memorize these before reading results)
+
+1. Client line sags while drain ≈ 1.0 → client overhead (real knee).
+2. Drain sags too → server/OS ceiling, not a client result.
+3. Low efficiency BUT p95 stream stretch ≈ 1.0 AND small TTFC excess AND zero failures → **window-dilution artifact**, not a knee (one straggling worker stretches the closed-loop measurement window while the rest idle). The report auto-flags these cells ("window dilution") and annotates suspect stops.
+4. Cross-check `server_stats.json` (schedule slip = server's own lateness vs its timetable, measured against the oldest event in each batch) and `cpu.json` per cell.
+
+## Findings so far (M5 MacBook, shared server+client)
+
+- All clients ≈ 0.999 up to c=16 at every tested rate.
+- python: TTFC-tail knee at c=64 (p95 excess 240–290ms, both tiers — asyncio admission queueing); single-core parse collapse at eps500/c=256 (efficiency 0.22, ~24k events/s ceiling, CPU pinned at 100% of one core).
+- go and both rust clients: statistically indistinguishable below box saturation. Do NOT conclude "Go > Rust" from existing data — every sub-0.99 rust cell below c=1024 is a flagged dilution artifact, and rust-hyper's eps100/c1024 rung is missing due to a false stop.
+- Box ceiling (shared MacBook): ~330k events/s aggregate at eps500/c1024 — drain collapses, server CPU 480–820%, slip clean (generator on time; delivery path saturated).
+- Result trees: `results/20260703T065449Z` (eps500 ladder), `results/20260703T071614Z` (python+drain at c256), `results/20260703T072701Z` (eps100 ladder). Merged report: `reports/sweep/index.html`.
+
+## Known open issues (priority order)
+
+1. **Window-dilution artifact is flagged but not fixed.** Root fix = window-clipped counting: clients count only chunks received inside the measured window; denominator = the window itself. Contained change: all 4 clients + aggregation + tests. Matters most for low-rate tiers and the dense ladder — false stops prune real rungs (this already cost rust-hyper its eps100/c1024 cell).
+2. Stop rules act on diluted numbers mid-sweep (consequence of #1).
+3. `CpuSampler` uses `ps -o %cpu` (decaying average on macOS; on Linux it's total-lifetime average) — treat CPU numbers as indicative. A proper interval sampler (delta of utime/stime from /proc) would be better on Linux.
+4. Workers are phase-locked (all start at t=0 with identical cycle lengths), so connect bursts recur in lockstep — python's TTFC knee partially reflects synchronized arrivals. Optional: stagger worker start by i×(cycle/N).
+5. Minor deferred review findings are listed at the end of `.superpowers/sdd/progress.md` (untracked scratch; consult git log if absent).
+
+## Runbook: dedicated Linux machine
+
+Prereqs: Rust stable, Go 1.22+, Python 3.12+, `uv`, `taskset` (util-linux — present on virtually every distro).
+
+```bash
+uv sync                                    # creates .venv with httpx
+# EDIT config/sweep.linux.json first:
+#   server_cpus / client_cpus: disjoint core lists matching the machine
+#     (server 8 cores is plenty; give clients the rest; avoid SMT siblings
+#      crossing the two sets if possible)
+#   server_worker_threads: = number of server cores
+.venv/bin/python scripts/run_sweep.py --config config/sweep.linux.json
+.venv/bin/python scripts/generate_sweep_report.py    # newest run; pass several dirs to merge
+```
+
+Notes:
+- The runner builds all binaries, starts the server itself (port 8080), raises RLIMIT_NOFILE, writes `results/<UTC>/…` incrementally (`sweep.json` survives crashes/ctrl-C), and prints `[N/total]` progress with ETA.
+- The python client MUST run under the venv interpreter (the runner fails fast with exit 2 if httpx is missing — that is the designed behavior, not a bug).
+- Profile ceiling: 12 rungs × 5 tiers × 3 repeats × 5 clients ≈ 900 runs ≈ 4h; stop rules prune. `make sweep-smoke` (~30s) is the sanity gate after any change.
+- Cooldowns are 5s; at high rungs watch for TIME_WAIT/ephemeral-port pressure if failures appear at c≥768 (failures at high rungs only = environment, per interpretation rule 4).
+- Interesting numbers to extract: drain's curve on isolated server cores = the Rust server's true delivery ceiling; whether go vs rust separate at 384–1024 once dilution and contention are gone.
+
+## Conventions
+
+- Commits go straight to `main`, imperative subject ("Add …", "Fix …").
+- Tests: `make test` (python via unittest, go test, two cargo suites). Keep the summary schema byte-identical across all clients — it is the cross-language contract.
+- Sweep/workload configs are JSON in `config/`; never hardcode workload parameters in clients.
