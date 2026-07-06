@@ -17,6 +17,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from bench_harness import clients as client_registry
+from bench_harness.display import PlainDisplay, create_display
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -412,42 +413,47 @@ def run_cell_client(
     client_name: str,
     config_path: Path,
     out_dir: Path,
+    display: Any = None,
 ) -> dict[str, Any] | None:
+    display = display or PlainDisplay()
     out_dir.mkdir(parents=True, exist_ok=True)
     try:
         http_post(f"{sweep.base_url}/stats/reset")
     except OSError as error:
-        print(f"warning: failed to reset server stats before {client_name}: {error}", file=sys.stderr)
+        display.warn(f"failed to reset server stats before {client_name}: {error}")
 
     command = taskset_prefix(sweep.client_cpus) + client_command(
         client_name, binaries, config_path, out_dir
     )
-    print("  +", " ".join(command))
-    process = subprocess.Popen(command, cwd=ROOT)
-    sampler = CpuSampler({"server": server_pid, "client": process.pid}).start()
+    display.command(" ".join(command))
+    # Client stdout/stderr goes to a per-cell log so the console belongs to
+    # the sweep display, and a failed cell can be diagnosed after the run.
+    with open(out_dir / "client.log", "w") as client_log:
+        process = subprocess.Popen(command, cwd=ROOT, stdout=client_log, stderr=client_log)
+        sampler = CpuSampler({"server": server_pid, "client": process.pid}).start()
 
-    timeout = sweep.warmup_seconds + sweep.duration_seconds + 120.0
-    timed_out = False
-    try:
-        returncode = process.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        process.kill()
+        timeout = sweep.warmup_seconds + sweep.duration_seconds + 120.0
+        timed_out = False
         try:
-            process.wait(timeout=5)
+            returncode = process.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
-            print(f"warning: {client_name} did not reap after kill, continuing", file=sys.stderr)
-        print(f"warning: {client_name} timed out after {timeout:.0f}s, killed", file=sys.stderr)
-        timed_out = True
-        returncode = None
-    except Exception:
-        process.kill()
-        raise
+            process.kill()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                display.warn(f"{client_name} did not reap after kill, continuing")
+            display.warn(f"{client_name} timed out after {timeout:.0f}s, killed")
+            timed_out = True
+            returncode = None
+        except Exception:
+            process.kill()
+            raise
 
     cpu = sampler.stop()
     try:
         server_stats = http_get_json(f"{sweep.base_url}/stats")
     except OSError as error:
-        print(f"warning: failed to fetch server stats after {client_name}: {error}", file=sys.stderr)
+        display.warn(f"failed to fetch server stats after {client_name}: {error}")
         server_stats = {}
 
     (out_dir / "server_stats.json").write_text(json.dumps(server_stats, indent=2) + "\n")
@@ -456,11 +462,11 @@ def run_cell_client(
     if timed_out:
         return None
     if returncode != 0:
-        print(f"warning: {client_name} exited {returncode}", file=sys.stderr)
+        display.warn(f"{client_name} exited {returncode} (see {out_dir / 'client.log'})")
         return None
     summary_path = out_dir / "summary.json"
     if not summary_path.exists():
-        print(f"warning: {client_name} wrote no summary.json", file=sys.stderr)
+        display.warn(f"{client_name} wrote no summary.json (see {out_dir / 'client.log'})")
         return None
     return json.loads(summary_path.read_text())
 
@@ -501,6 +507,13 @@ def main() -> int:
         default="results",
         help="Root directory for run output (default: %(default)s).",
     )
+    parser.add_argument(
+        "--display",
+        choices=("auto", "rich", "plain"),
+        default="auto",
+        help="Console output style: rich live progress on a terminal, plain "
+             "lines for pipes/CI (default: %(default)s).",
+    )
     args = parser.parse_args()
 
     sweep = SweepConfig.from_path(ROOT / args.config)
@@ -540,17 +553,19 @@ def main() -> int:
         "cells": [],
     }
     progress = SweepProgress(sweep)
-    print(
-        f"sweep plan: {len(sweep.tiers)} tiers x {len(sweep.concurrencies)} concurrencies "
-        f"x {sweep.repeats} repeats x {len(sweep.clients)} clients "
-        f"= {progress.total} client-runs -> {run_dir}",
-        flush=True,
+    display = create_display(args.display)
+    display.plan(
+        f"{len(sweep.tiers)} tiers x {len(sweep.concurrencies)} concurrencies "
+        f"x {sweep.repeats} repeats x {len(sweep.clients)} clients",
+        str(run_dir),
+        progress.total,
     )
     try:
         wait_for_health(f"{sweep.base_url}/health")
 
         for tier_index, tier in enumerate(sweep.tiers):
             active = list(sweep.clients)
+            paced = tier.events_per_second > 0
             for rung_index, concurrency in enumerate(sweep.concurrencies):
                 if not active:
                     break
@@ -558,12 +573,11 @@ def main() -> int:
                 config_path = run_dir / "configs" / f"{tier.name}-c{concurrency}.json"
                 config_path.write_text(json.dumps(workload, indent=2) + "\n")
 
-                print(
-                    f"\n=== {tier.name} c={concurrency} "
+                display.rung_start(
+                    f"{tier.name} c={concurrency} "
                     f"(tier {tier_index + 1}/{len(sweep.tiers)}, "
                     f"rung {rung_index + 1}/{len(sweep.concurrencies)}) "
-                    f"active: {', '.join(active)}",
-                    flush=True,
+                    f"active: {', '.join(active)}"
                 )
 
                 cell_summaries: dict[str, list[dict[str, Any]]] = {name: [] for name in active}
@@ -574,24 +588,21 @@ def main() -> int:
                             f"[{progress.completed + 1}/{progress.total}] "
                             f"{tier.name} c={concurrency} r{repeat} {client_name}"
                         )
-                        print(run_label, flush=True)
+                        display.run_start(run_label)
                         run_started = time.monotonic()
                         out_dir = run_dir / tier.name / f"c{concurrency}" / f"r{repeat}" / client_name
                         result = run_cell_client(
-                            sweep, binaries, server.pid, client_name, config_path, out_dir
+                            sweep, binaries, server.pid, client_name, config_path, out_dir,
+                            display=display,
                         )
                         run_seconds = time.monotonic() - run_started
                         progress.finish_run(run_seconds)
-                        if result is not None:
-                            summary = result["summary"]
-                            outcome = (
-                                f"efficiency={summary['efficiency']:.3f} "
-                                f"failed={summary['failed_requests']} "
-                                f"incomplete={summary['incomplete_requests']}"
-                            )
-                        else:
-                            outcome = "FAILED (no summary)"
-                        print(f"{run_label} done in {run_seconds:.1f}s · {outcome}", flush=True)
+                        display.run_done(
+                            run_label,
+                            run_seconds,
+                            result["summary"] if result is not None else None,
+                            paced,
+                        )
                         record["cells"].append({
                             "tier": tier.name,
                             "concurrency": concurrency,
@@ -615,14 +626,14 @@ def main() -> int:
                             "reason": reason,
                         }
                         pruned = progress.drop_client(rung_index)
-                        print(
-                            f"stop {tier.name}/{client_name} at c={concurrency}: {reason} "
+                        display.stop(
+                            f"{tier.name}/{client_name} at c={concurrency}: {reason} "
                             f"({pruned} runs pruned)",
-                            flush=True,
+                            progress.total,
                         )
 
                 write_sweep_record(run_dir, record)
-                print(f"progress: {progress.status()}", flush=True)
+                display.rung_progress(progress.status())
 
                 if sweep.cooldown_seconds > 0:
                     time.sleep(sweep.cooldown_seconds)
@@ -635,9 +646,10 @@ def main() -> int:
             server.wait(timeout=5)
         record["finished_at"] = datetime.now(timezone.utc).isoformat()
         write_sweep_record(run_dir, record)
+        display.close()
 
-    print(
-        f"\nsweep complete: {progress.completed}/{progress.total} runs "
+    display.complete(
+        f"sweep complete: {progress.completed}/{progress.total} runs "
         f"in {format_duration(progress.elapsed_seconds())}, "
         f"{len(record['stops'])} stop(s)"
     )

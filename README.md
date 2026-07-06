@@ -74,6 +74,13 @@ make sweep-report                             # report from the newest run
 make sweep-report RUNS="results/<a> results/<b>"   # merge several runs
 ```
 
+On a terminal the sweep shows a live progress bar (spinner, current cell,
+completed/total with the denominator shrinking as stop rules prune, elapsed,
+ETA) with color-coded per-run results above it; in pipes/CI it automatically
+falls back to plain log lines. Override with `bench-sweep --display
+rich|plain|auto`. Each cell's client stdout/stderr is captured to
+`<cell>/client.log` rather than the console.
+
 The same commands are installed into the venv by `uv sync` as console
 scripts, for use without make:
 
