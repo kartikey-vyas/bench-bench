@@ -47,7 +47,7 @@ Total SSE events = `chunks + 3`. With `events_per_second: 0` everything is due i
 
 ### Per-request measurement fields (all clients)
 
-`ok` (transport+parse success and saw `[DONE]`; drain: read to EOF), `latency_ms`, `first_chunk_ms` (first parsed SSE event — the role event), `chunks` (content events with non-empty `delta.content` only), `bytes` (content bytes; drain: wire bytes), `max_gap_ms` (max gap between successive parsed events), `stream_ms` (first event → last event).
+`ok` (transport+parse success and saw `[DONE]`; drain: read to EOF), `latency_ms`, `first_chunk_ms` (first parsed SSE event — the role event), `chunks` (content events with non-empty `delta.content` only), `bytes` (content bytes; drain: wire bytes), `window_chunks` (content chunks whose arrival timestamp is ≤ the measured window's absolute end — see chunks_per_second below), `max_gap_ms` (max gap between successive parsed events), `stream_ms` (first event → last event).
 
 ### summary.json `summary` keys (identical in all clients)
 
@@ -58,7 +58,8 @@ Aggregation rules (identical everywhere):
 - Percentiles (nearest-rank, existing implementations) over successful requests only; totals over successful only.
 - `ideal_stream_ms = (expected - 1) / events_per_second * 1000` when `events_per_second > 0 && expected > 1`, else stretch list is empty and stretch percentiles are 0.0. `stream_stretch = stream_ms / ideal_stream_ms` per successful request.
 - **[AMENDED after Task 9 integration]** `ideal_events_per_second` must account for TTFC dead time in the closed loop: when `events_per_second > 0`, `ideal_request_seconds = ttfc_ms/1000 + (expected - 1)/events_per_second`, and `ideal_events_per_second = concurrency * expected / ideal_request_seconds` (0.0 if `ideal_request_seconds` is 0). When unpaced, 0.0. `efficiency = chunks_per_second / ideal_events_per_second` (0.0 when unpaced). The original `eps × concurrency` definition was unreachable for any client (a perfect closed-loop client idles through TTFC every request) and would have falsely triggered stop rules. Python's `aggregate_summary` gains a `ttfc_ms` parameter.
-- `requests_per_second = successful / duration_seconds`; `chunks_per_second = total_chunks / duration_seconds`.
+- `requests_per_second = successful / duration_seconds` (actual duration).
+- `chunks_per_second` = content chunks received inside the measured window (all requests, including failed/incomplete) ÷ configured `duration_seconds` — window-clipped so a straggling worker cannot dilute the aggregate. Frame-granular clients (drain, python-deferred) approximate clipped counts to within one event. Each per-request measurement carries a `window_chunks` field (content chunks, or for frame-granular clients, `min(total_content_chunks, in_window_event_boundaries)`) counted against the window's absolute end (`started + duration_seconds`), passed into the per-request call by the closed-loop worker loop that owns it. `chunks_per_second = sum(window_chunks over ALL measurements) / duration_seconds` (the configured value, not the stretched actual duration). `efficiency = chunks_per_second / ideal_events_per_second` (formula unchanged; only the numerator's counting changed).
 - `per_chunk_overhead_ms` is REMOVED from the schema.
 
 ### Result envelope (unchanged shape)

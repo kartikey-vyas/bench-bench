@@ -49,9 +49,9 @@ func TestAggregateSummaryClassifiesAndComputesEfficiency(t *testing.T) {
 		DurationSeconds:   1,
 	}
 	measurements := []Measurement{
-		{OK: true, LatencyMS: 50, FirstChunkMS: 10, Chunks: 4, Bytes: 32, MaxGapMS: 12, StreamMS: 30},
-		{OK: true, LatencyMS: 60, FirstChunkMS: 12, Chunks: 3, Bytes: 24, MaxGapMS: 15, StreamMS: 28},
-		{OK: false, LatencyMS: 5},
+		{OK: true, LatencyMS: 50, FirstChunkMS: 10, Chunks: 4, Bytes: 32, WindowChunks: 4, MaxGapMS: 12, StreamMS: 30},
+		{OK: true, LatencyMS: 60, FirstChunkMS: 12, Chunks: 3, Bytes: 24, WindowChunks: 3, MaxGapMS: 15, StreamMS: 28},
+		{OK: false, LatencyMS: 5, WindowChunks: 0},
 	}
 
 	summary := aggregateSummary(measurements, 1000.0, config)
@@ -65,12 +65,18 @@ func TestAggregateSummaryClassifiesAndComputesEfficiency(t *testing.T) {
 	if summary.FailedRequests != 1 {
 		t.Fatalf("failed = %d, want 1", summary.FailedRequests)
 	}
-	// ideal_request_seconds = 0 + 3/100 = 0.03; ideal = 2*4/0.03 = 266.6667; efficiency = 4/266.6667 = 0.015
+	// window-clipped: chunks_per_second sums WindowChunks over ALL
+	// measurements (4+3+0=7) divided by the CONFIGURED duration (1s), not
+	// total_chunks/actual-duration.
+	if math.Abs(summary.ChunksPerSecond-7.0) > 1e-9 {
+		t.Fatalf("chunks/s = %v, want 7.0", summary.ChunksPerSecond)
+	}
+	// ideal_request_seconds = 0 + 3/100 = 0.03; ideal = 2*4/0.03 = 266.6667; efficiency = 7/266.6667 = 0.02625
 	if math.Abs(summary.IdealEventsPerSecond-266.6666666666667) > 1e-6 {
 		t.Fatalf("ideal = %v, want 266.6666666666667", summary.IdealEventsPerSecond)
 	}
-	if math.Abs(summary.Efficiency-0.015) > 1e-6 {
-		t.Fatalf("efficiency = %v, want 0.015", summary.Efficiency)
+	if math.Abs(summary.Efficiency-0.02625) > 1e-6 {
+		t.Fatalf("efficiency = %v, want 0.02625", summary.Efficiency)
 	}
 	// ideal stream = (4-1)/100*1000 = 30ms; stretch = 30/30 = 1.0
 	if math.Abs(summary.P50StreamStretch-1.0) > 1e-9 {

@@ -14,7 +14,7 @@ from bench_harness.sse import SseDecoder
 
 
 async def run_one_request(
-    client: Any, config: WorkloadConfig, worker_index: int, sequence: int
+    client: Any, config: WorkloadConfig, worker_index: int, sequence: int, window_end: float
 ) -> RequestMeasurement:
     started = time.perf_counter()
     first_event_at: float | None = None
@@ -23,9 +23,10 @@ async def run_one_request(
     max_gap_ms = 0.0
     chunks = 0
     content_bytes = 0
+    window_chunks = 0
     saw_done = False
 
-    def observe_event() -> None:
+    def observe_event() -> float:
         nonlocal first_event_at, previous_event_at, last_event_at, max_gap_ms
         now = time.perf_counter()
         if first_event_at is None:
@@ -34,6 +35,7 @@ async def run_one_request(
             max_gap_ms = max(max_gap_ms, (now - previous_event_at) * 1000.0)
         previous_event_at = now
         last_event_at = now
+        return now
 
     def measurement(ok: bool) -> RequestMeasurement:
         first_chunk_ms = (
@@ -50,6 +52,7 @@ async def run_one_request(
             first_chunk_ms=first_chunk_ms,
             chunks=chunks,
             bytes=content_bytes,
+            window_chunks=window_chunks,
             max_gap_ms=max_gap_ms,
             stream_ms=stream_ms,
         )
@@ -64,7 +67,7 @@ async def run_one_request(
             decoder = SseDecoder()
             async for text in response.aiter_text():
                 for event in decoder.feed(text):
-                    observe_event()
+                    now = observe_event()
                     if event == "[DONE]":
                         saw_done = True
                         continue
@@ -73,6 +76,8 @@ async def run_one_request(
                     if content:
                         chunks += 1
                         content_bytes += len(content.encode("utf-8"))
+                        if now <= window_end:
+                            window_chunks += 1
     except Exception:
         return measurement(ok=False)
 
@@ -86,16 +91,19 @@ async def run_for(
     request_fn: Any = None,
 ) -> tuple[list[RequestMeasurement], float]:
     """Closed-loop worker pool shared by all Python client variants.
-    request_fn(client, config, worker_index, sequence) -> RequestMeasurement."""
+    request_fn(client, config, worker_index, sequence, window_end) -> RequestMeasurement."""
     request_fn = request_fn or run_one_request
     measurements: list[RequestMeasurement] = []
     started = time.perf_counter()
     deadline = started + seconds
+    window_end = deadline
 
     async def worker(worker_index: int) -> None:
         sequence = 0
         while time.perf_counter() < deadline:
-            measurements.append(await request_fn(client, config, worker_index, sequence))
+            measurements.append(
+                await request_fn(client, config, worker_index, sequence, window_end)
+            )
             sequence += 1
 
     await asyncio.gather(*(worker(index) for index in range(config.concurrency)))
@@ -135,6 +143,7 @@ async def run_benchmark(config: WorkloadConfig, output_dir: Path | None = None) 
             events_per_second=config.events_per_second,
             concurrency=config.concurrency,
             ttfc_ms=config.ttfc_ms,
+            duration_window_seconds=config.duration_seconds,
         ),
     }
 

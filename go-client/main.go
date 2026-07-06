@@ -35,6 +35,7 @@ type Measurement struct {
 	FirstChunkMS float64
 	Chunks       int
 	Bytes        int
+	WindowChunks int
 	MaxGapMS     float64
 	StreamMS     float64
 }
@@ -178,15 +179,16 @@ func (config Config) requestPayload(workerIndex int, sequence int, language stri
 	}
 }
 
-func runOneRequest(client *http.Client, config Config, workerIndex int, sequence int) Measurement {
+func runOneRequest(client *http.Client, config Config, workerIndex int, sequence int, windowEnd time.Time) Measurement {
 	started := time.Now()
 	var firstEventAt, previousEventAt, lastEventAt time.Time
 	maxGapMS := 0.0
 	chunks := 0
 	contentBytes := 0
+	windowChunks := 0
 	sawDone := false
 
-	observe := func() {
+	observe := func() time.Time {
 		now := time.Now()
 		if firstEventAt.IsZero() {
 			firstEventAt = now
@@ -199,6 +201,7 @@ func runOneRequest(client *http.Client, config Config, workerIndex int, sequence
 		}
 		previousEventAt = now
 		lastEventAt = now
+		return now
 	}
 
 	build := func(ok bool) Measurement {
@@ -216,6 +219,7 @@ func runOneRequest(client *http.Client, config Config, workerIndex int, sequence
 			FirstChunkMS: firstChunkMS,
 			Chunks:       chunks,
 			Bytes:        contentBytes,
+			WindowChunks: windowChunks,
 			MaxGapMS:     maxGapMS,
 			StreamMS:     streamMS,
 		}
@@ -250,7 +254,7 @@ func runOneRequest(client *http.Client, config Config, workerIndex int, sequence
 		piece, readErr := reader.ReadString('\n')
 		if len(piece) > 0 {
 			for _, event := range decoder.feed(piece) {
-				observe()
+				now := observe()
 				if event == "[DONE]" {
 					sawDone = true
 					continue
@@ -273,6 +277,9 @@ func runOneRequest(client *http.Client, config Config, workerIndex int, sequence
 				if content != "" {
 					chunks++
 					contentBytes += len(content)
+					if !now.After(windowEnd) {
+						windowChunks++
+					}
 				}
 			}
 		}
@@ -293,7 +300,10 @@ func runFor(config Config, seconds float64, client *http.Client) ([]Measurement,
 		return nil, 0
 	}
 	started := time.Now()
-	deadline := started.Add(time.Duration(seconds * float64(time.Second)))
+	// windowEnd is the measured window's absolute deadline: the closed-loop
+	// worker loop below owns started+seconds and passes it into every
+	// per-request call so window-clipped counting can compare against it.
+	windowEnd := started.Add(time.Duration(seconds * float64(time.Second)))
 
 	var mu sync.Mutex
 	measurements := []Measurement{}
@@ -303,8 +313,8 @@ func runFor(config Config, seconds float64, client *http.Client) ([]Measurement,
 		wg.Add(1)
 		go func(workerIndex int) {
 			defer wg.Done()
-			for sequence := 0; time.Now().Before(deadline); sequence++ {
-				measurement := runOneRequest(client, config, workerIndex, sequence)
+			for sequence := 0; time.Now().Before(windowEnd); sequence++ {
+				measurement := runOneRequest(client, config, workerIndex, sequence, windowEnd)
 				mu.Lock()
 				measurements = append(measurements, measurement)
 				mu.Unlock()
@@ -327,6 +337,7 @@ func aggregateSummary(measurements []Measurement, durationMS float64, config Con
 	failed := 0
 	totalChunks := 0
 	totalBytes := 0
+	totalWindowChunks := 0
 
 	idealStreamMS := 0.0
 	if config.EventsPerSecond > 0 && expected > 1 {
@@ -334,6 +345,10 @@ func aggregateSummary(measurements []Measurement, durationMS float64, config Con
 	}
 
 	for _, measurement := range measurements {
+		// window_chunks is summed over ALL measurements (including failed and
+		// incomplete) — that is the point of window-clipped counting: a
+		// straggling worker cannot dilute the aggregate.
+		totalWindowChunks += measurement.WindowChunks
 		if !measurement.OK {
 			failed++
 			continue
@@ -357,8 +372,12 @@ func aggregateSummary(measurements []Measurement, durationMS float64, config Con
 	chunksPerSecond := 0.0
 	requestsPerSecond := 0.0
 	if durationSeconds > 0 {
-		chunksPerSecond = float64(totalChunks) / durationSeconds
 		requestsPerSecond = float64(successful) / durationSeconds
+	}
+	if config.DurationSeconds > 0 {
+		// Window-clipped: divide by the CONFIGURED duration, not the
+		// (possibly straggler-stretched) actual duration.
+		chunksPerSecond = float64(totalWindowChunks) / config.DurationSeconds
 	}
 	idealEventsPerSecond := 0.0
 	if config.EventsPerSecond > 0 {

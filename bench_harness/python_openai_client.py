@@ -18,7 +18,7 @@ OUTPUT_SUBDIR = "python-openai"
 
 
 async def run_one_request(
-    client: Any, config: WorkloadConfig, worker_index: int, sequence: int
+    client: Any, config: WorkloadConfig, worker_index: int, sequence: int, window_end: float
 ) -> RequestMeasurement:
     """One stream through the official OpenAI SDK — the production setup.
 
@@ -35,8 +35,9 @@ async def run_one_request(
     max_gap_ms = 0.0
     chunks = 0
     content_bytes = 0
+    window_chunks = 0
 
-    def observe_event() -> None:
+    def observe_event() -> float:
         nonlocal first_event_at, previous_event_at, last_event_at, max_gap_ms
         now = time.perf_counter()
         if first_event_at is None:
@@ -45,6 +46,7 @@ async def run_one_request(
             max_gap_ms = max(max_gap_ms, (now - previous_event_at) * 1000.0)
         previous_event_at = now
         last_event_at = now
+        return now
 
     def measurement(ok: bool) -> RequestMeasurement:
         first_chunk_ms = (
@@ -61,6 +63,7 @@ async def run_one_request(
             first_chunk_ms=first_chunk_ms,
             chunks=chunks,
             bytes=content_bytes,
+            window_chunks=window_chunks,
             max_gap_ms=max_gap_ms,
             stream_ms=stream_ms,
         )
@@ -81,13 +84,15 @@ async def run_one_request(
         )
         try:
             async for chunk in stream:
-                observe_event()
+                now = observe_event()
                 if not chunk.choices:
                     continue
                 content = chunk.choices[0].delta.content or ""
                 if content:
                     chunks += 1
                     content_bytes += len(content.encode("utf-8"))
+                    if now <= window_end:
+                        window_chunks += 1
         finally:
             close = getattr(stream, "close", None)
             if close is not None:
@@ -142,6 +147,7 @@ async def run_benchmark(config: WorkloadConfig, output_dir: Path | None = None) 
             events_per_second=config.events_per_second,
             concurrency=config.concurrency,
             ttfc_ms=config.ttfc_ms,
+            duration_window_seconds=config.duration_seconds,
         ),
     }
 

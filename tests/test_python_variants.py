@@ -1,4 +1,5 @@
 import asyncio
+import time
 import unittest
 from types import SimpleNamespace
 
@@ -74,15 +75,18 @@ class FakeHttpxClient:
 class DeferredClientTests(unittest.TestCase):
     def test_counts_content_after_close_and_completes(self):
         pieces = stream_bytes(3, "xxxx")
-        m = asyncio.run(deferred_request(FakeHttpxClient(pieces), make_config(3), 0, 0))
+        window_end = time.perf_counter() + 60
+        m = asyncio.run(deferred_request(FakeHttpxClient(pieces), make_config(3), 0, 0, window_end))
         self.assertTrue(m.ok)
         self.assertEqual(m.chunks, 3)
         self.assertEqual(m.bytes, 12)
+        self.assertEqual(m.window_chunks, m.chunks)
         self.assertGreater(m.first_chunk_ms, 0.0)
 
     def test_missing_done_marks_not_ok_but_still_counts(self):
         pieces = stream_bytes(3, "xxxx")[:-1]
-        m = asyncio.run(deferred_request(FakeHttpxClient(pieces), make_config(3), 0, 0))
+        window_end = time.perf_counter() + 60
+        m = asyncio.run(deferred_request(FakeHttpxClient(pieces), make_config(3), 0, 0, window_end))
         self.assertFalse(m.ok)
         self.assertEqual(m.chunks, 3)
 
@@ -91,8 +95,11 @@ class DeferredClientTests(unittest.TestCase):
         blob = b"".join(pieces)
         # Re-split so an event boundary straddles two reads.
         split = blob.find(b"\n\n") + 1
+        window_end = time.perf_counter() + 60
         m = asyncio.run(
-            deferred_request(FakeHttpxClient([blob[:split], blob[split:]]), make_config(2), 0, 0)
+            deferred_request(
+                FakeHttpxClient([blob[:split], blob[split:]]), make_config(2), 0, 0, window_end
+            )
         )
         self.assertTrue(m.ok)
         self.assertEqual(m.chunks, 2)
@@ -179,10 +186,12 @@ class OpenAiClientTests(unittest.TestCase):
     def test_counts_content_chunks_and_passes_pacing_extra_body(self):
         chunks = [sdk_chunk(""), sdk_chunk("xxxx"), sdk_chunk("xxxx"), sdk_chunk(None)]
         client = FakeSdkClient(chunks)
-        m = asyncio.run(openai_request(client, make_config(2), 0, 5))
+        window_end = time.perf_counter() + 60
+        m = asyncio.run(openai_request(client, make_config(2), 0, 5, window_end))
         self.assertTrue(m.ok)
         self.assertEqual(m.chunks, 2)          # empty/None deltas not counted
         self.assertEqual(m.bytes, 8)
+        self.assertEqual(m.window_chunks, m.chunks)
         extra = client.create_kwargs["extra_body"]
         self.assertEqual(extra["chunks"], 2)
         self.assertEqual(extra["request_id"], "python-openai-0-5")
@@ -190,7 +199,8 @@ class OpenAiClientTests(unittest.TestCase):
     def test_closes_stream_on_success(self):
         chunks = [sdk_chunk(""), sdk_chunk("xxxx"), sdk_chunk(None)]
         client = FakeSdkClient(chunks)
-        m = asyncio.run(openai_request(client, make_config(2), 0, 0))
+        window_end = time.perf_counter() + 60
+        m = asyncio.run(openai_request(client, make_config(2), 0, 0, window_end))
         self.assertTrue(m.ok)
         self.assertTrue(client.stream.closed)
 
@@ -201,14 +211,16 @@ class OpenAiClientTests(unittest.TestCase):
                     raise RuntimeError("boom")
                 self.chat = SimpleNamespace(completions=SimpleNamespace(create=create))
 
-        m = asyncio.run(openai_request(ExplodingClient(), make_config(2), 0, 0))
+        window_end = time.perf_counter() + 60
+        m = asyncio.run(openai_request(ExplodingClient(), make_config(2), 0, 0, window_end))
         self.assertFalse(m.ok)
         self.assertEqual(m.chunks, 0)
 
     def test_closes_stream_when_iteration_raises_mid_stream(self):
         chunks = [sdk_chunk(""), sdk_chunk("xxxx"), sdk_chunk("xxxx"), sdk_chunk(None)]
         client = FakeSdkClientMidStreamFailure(chunks, fail_after=2)
-        m = asyncio.run(openai_request(client, make_config(3), 0, 0))
+        window_end = time.perf_counter() + 60
+        m = asyncio.run(openai_request(client, make_config(3), 0, 0, window_end))
         self.assertFalse(m.ok)
         self.assertTrue(client.stream.closed)
 

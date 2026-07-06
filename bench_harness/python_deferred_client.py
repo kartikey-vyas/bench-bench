@@ -43,7 +43,7 @@ class BoundaryCounter:
 
 
 async def run_one_request(
-    client: Any, config: WorkloadConfig, worker_index: int, sequence: int
+    client: Any, config: WorkloadConfig, worker_index: int, sequence: int, window_end: float
 ) -> RequestMeasurement:
     """One stream with all decode deferred off the hot path.
 
@@ -61,8 +61,9 @@ async def run_one_request(
     counter = BoundaryCounter()
     raw_parts: list[bytes] = []
     transport_ok = True
+    in_window_boundaries = 0
 
-    def observe_frame() -> None:
+    def observe_frame() -> float:
         nonlocal first_event_at, previous_event_at, last_event_at, max_gap_ms
         now = time.perf_counter()
         if first_event_at is None:
@@ -71,6 +72,7 @@ async def run_one_request(
             max_gap_ms = max(max_gap_ms, (now - previous_event_at) * 1000.0)
         previous_event_at = now
         last_event_at = now
+        return now
 
     try:
         payload = config.request_payload(worker_index, sequence, "python-deferred")
@@ -81,8 +83,11 @@ async def run_one_request(
             else:
                 async for data in response.aiter_bytes():
                     raw_parts.append(data)
-                    if counter.feed(data) > 0:
-                        observe_frame()
+                    boundary_count = counter.feed(data)
+                    if boundary_count > 0:
+                        now = observe_frame()
+                        if now <= window_end:
+                            in_window_boundaries += boundary_count
     except Exception:
         transport_ok = False
 
@@ -107,6 +112,16 @@ async def run_one_request(
                 chunks += 1
                 content_bytes += len(content.encode("utf-8"))
 
+    # Frame-granular: we can't timestamp individual content chunks here (the
+    # decode is deferred), only SSE event boundaries as they arrive on the
+    # wire. in_window_boundaries counts boundaries (role + content + finish +
+    # [DONE], whichever arrived by window_end); min() with the true content
+    # count clips to a window_chunks estimate that is exact when the stream
+    # completed inside the window (boundaries == chunks + 3, min = chunks)
+    # and overcounts by at most 1 (the role event boundary) out of ~512 when
+    # the window clips mid-stream.
+    window_chunks = min(chunks, in_window_boundaries)
+
     first_chunk_ms = (first_event_at - started) * 1000.0 if first_event_at is not None else 0.0
     stream_ms = (
         (last_event_at - first_event_at) * 1000.0
@@ -119,6 +134,7 @@ async def run_one_request(
         first_chunk_ms=first_chunk_ms,
         chunks=chunks,
         bytes=content_bytes,
+        window_chunks=window_chunks,
         max_gap_ms=max_gap_ms,
         stream_ms=stream_ms,
     )
@@ -157,6 +173,7 @@ async def run_benchmark(config: WorkloadConfig, output_dir: Path | None = None) 
             events_per_second=config.events_per_second,
             concurrency=config.concurrency,
             ttfc_ms=config.ttfc_ms,
+            duration_window_seconds=config.duration_seconds,
         ),
     }
 

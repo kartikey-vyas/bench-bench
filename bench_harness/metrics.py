@@ -11,6 +11,7 @@ class RequestMeasurement:
     first_chunk_ms: float
     chunks: int
     bytes: int
+    window_chunks: int
     max_gap_ms: float
     stream_ms: float
 
@@ -36,6 +37,7 @@ def aggregate_summary(
     events_per_second: int,
     concurrency: int,
     ttfc_ms: int,
+    duration_window_seconds: float,
 ) -> dict[str, float | int]:
     successful = [m for m in measurements if m.ok and m.chunks == expected_chunks]
     incomplete = [m for m in measurements if m.ok and m.chunks != expected_chunks]
@@ -48,7 +50,14 @@ def aggregate_summary(
     total_bytes = sum(m.bytes for m in successful)
 
     duration_seconds = duration_ms / 1000.0 if duration_ms > 0 else 0.0
-    chunks_per_second = total_chunks / duration_seconds if duration_seconds else 0.0
+    # Window-clipped: numerator sums window_chunks over ALL measurements
+    # (including failed/incomplete), denominator is the configured window,
+    # not the stretched actual duration — so one straggling worker cannot
+    # dilute the aggregate.
+    total_window_chunks = sum(m.window_chunks for m in measurements)
+    chunks_per_second = (
+        total_window_chunks / duration_window_seconds if duration_window_seconds > 0 else 0.0
+    )
 
     ideal_stream_ms = (
         (expected_chunks - 1) / events_per_second * 1000.0

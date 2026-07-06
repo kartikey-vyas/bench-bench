@@ -39,7 +39,7 @@ Contracts (wire protocol, 25-key summary schema, aggregation rules, amended effi
 
 1. Client line sags while drain ≈ 1.0 → client overhead (real knee).
 2. Drain sags too → server/OS ceiling, not a client result.
-3. Low efficiency BUT p95 stream stretch ≈ 1.0 AND small TTFC excess AND zero failures → **window-dilution artifact**, not a knee (one straggling worker stretches the closed-loop measurement window while the rest idle). The report auto-flags these cells ("window dilution") and annotates suspect stops.
+3. Low efficiency BUT p95 stream stretch ≈ 1.0 AND small TTFC excess AND zero failures → previously the **window-dilution artifact** (one straggling worker stretches the closed-loop measurement window while the rest idle); this is now fixed at the root by window-clipped counting (see known-issue history below), so it should essentially never fire on fresh runs. The report's dilution flag ("window dilution") is retained as a tripwire — if it still fires on a new run, treat that as a bug report, not an expected artifact. Flagged cells in OLD result trees (pre-fix runs, e.g. `results/20260703*`) should still be discounted per the original reasoning; they were not re-run.
 4. Cross-check `server_stats.json` (schedule slip = server's own lateness vs its timetable, measured against the oldest event in each batch) and `cpu.json` per cell.
 
 ## Findings so far (M5 MacBook, shared server+client)
@@ -52,11 +52,10 @@ Contracts (wire protocol, 25-key summary schema, aggregation rules, amended effi
 
 ## Known open issues (priority order)
 
-1. **Window-dilution artifact is flagged but not fixed.** Root fix = window-clipped counting: clients count only chunks received inside the measured window; denominator = the window itself. Contained change: all six real clients + drain + aggregation + tests. Matters most for low-rate tiers and the dense ladder — false stops prune real rungs (this already cost rust-hyper its eps100/c1024 cell).
-2. Stop rules act on diluted numbers mid-sweep (consequence of #1).
-3. `CpuSampler` uses `ps -o %cpu` (decaying average on macOS; on Linux it's total-lifetime average) — treat CPU numbers as indicative. A proper interval sampler (delta of utime/stime from /proc) would be better on Linux.
-4. Workers are phase-locked (all start at t=0 with identical cycle lengths), so connect bursts recur in lockstep — python's TTFC knee partially reflects synchronized arrivals. Optional: stagger worker start by i×(cycle/N).
-5. Minor deferred review findings: upper-bound validation tests are missing (e.g. no test asserts a rejection at the server's documented `chunks`/`chunk_bytes`/`ttfc_ms`/`events_per_second` maxima); negative-path config tests are sparse outside the sweep config validator. The report's series-label layout has a latent clamp edge once a merged report carries 20+ series (labels may overlap) — not yet hit in practice, not yet tested.
+1. **FIXED: window-dilution artifact.** Root fix landed: clients now count only chunks received inside the measured window (`window_chunks` per request) and divide by the configured `duration_seconds` itself rather than the stretched actual duration, so one straggling worker can no longer dilute the aggregate. Applied across all six real clients + drain + aggregation + tests; frame-granular clients (drain, python-deferred) approximate the clipped count to within one event. Stop rules, which previously acted on diluted numbers mid-sweep, benefit automatically since they consume the same summary. The report's dilution flag is retained as a tripwire (should essentially never fire now — see interpretation rule 3).
+2. `CpuSampler` uses `ps -o %cpu` (decaying average on macOS; on Linux it's total-lifetime average) — treat CPU numbers as indicative. A proper interval sampler (delta of utime/stime from /proc) would be better on Linux.
+3. Workers are phase-locked (all start at t=0 with identical cycle lengths), so connect bursts recur in lockstep — python's TTFC knee partially reflects synchronized arrivals. Optional: stagger worker start by i×(cycle/N).
+4. Minor deferred review findings: upper-bound validation tests are missing (e.g. no test asserts a rejection at the server's documented `chunks`/`chunk_bytes`/`ttfc_ms`/`events_per_second` maxima); negative-path config tests are sparse outside the sweep config validator. The report's series-label layout has a latent clamp edge once a merged report carries 20+ series (labels may overlap) — not yet hit in practice, not yet tested.
 
 ## Runbook: dedicated Linux machine
 

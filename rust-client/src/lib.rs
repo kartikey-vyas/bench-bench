@@ -162,6 +162,7 @@ pub struct Measurement {
     pub first_chunk_ms: f64,
     pub chunks: usize,
     pub bytes: usize,
+    pub window_chunks: usize,
     pub max_gap_ms: f64,
     pub stream_ms: f64,
 }
@@ -278,7 +279,10 @@ impl StreamTiming {
         }
     }
 
-    fn observe_event(&mut self) {
+    /// Stamps the clock for one observed event and returns the Instant it
+    /// captured, so callers can compare it against a measurement window's
+    /// absolute end without taking a second, slightly-later timestamp.
+    fn observe_event(&mut self) -> Instant {
         let now = Instant::now();
         if self.first_event_at.is_none() {
             self.first_event_at = Some(now);
@@ -291,9 +295,16 @@ impl StreamTiming {
         }
         self.previous_event_at = Some(now);
         self.last_event_at = Some(now);
+        now
     }
 
-    fn measurement(&self, ok: bool, chunks: usize, bytes: usize) -> Measurement {
+    fn measurement(
+        &self,
+        ok: bool,
+        chunks: usize,
+        bytes: usize,
+        window_chunks: usize,
+    ) -> Measurement {
         let first_chunk_ms = self.first_event_at.map_or(0.0, |at| {
             at.duration_since(self.started).as_secs_f64() * 1000.0
         });
@@ -307,6 +318,7 @@ impl StreamTiming {
             first_chunk_ms,
             chunks,
             bytes,
+            window_chunks,
             max_gap_ms: self.max_gap_ms,
             stream_ms,
         }
@@ -318,6 +330,7 @@ pub async fn run_one_reqwest_request(
     config: &Config,
     worker_index: usize,
     sequence: usize,
+    window_end: Instant,
 ) -> Measurement {
     let started = Instant::now();
     let mut timing = StreamTiming::new(started);
@@ -328,51 +341,55 @@ pub async fn run_one_reqwest_request(
         .await
     {
         Ok(response) => response,
-        Err(_) => return timing.measurement(false, 0, 0),
+        Err(_) => return timing.measurement(false, 0, 0, 0),
     };
 
     if !response.status().is_success() {
         let _ = response.bytes().await;
-        return timing.measurement(false, 0, 0);
+        return timing.measurement(false, 0, 0, 0);
     }
 
     let mut stream = response.bytes_stream();
     let mut decoder = SseDecoder::new();
     let mut chunks = 0;
     let mut content_bytes = 0;
+    let mut window_chunks = 0;
     let mut saw_done = false;
 
     while let Some(next) = stream.next().await {
         let bytes = match next {
             Ok(bytes) => bytes,
-            Err(_) => return timing.measurement(false, chunks, content_bytes),
+            Err(_) => return timing.measurement(false, chunks, content_bytes, window_chunks),
         };
         let text = match std::str::from_utf8(&bytes) {
             Ok(text) => text,
-            Err(_) => return timing.measurement(false, chunks, content_bytes),
+            Err(_) => return timing.measurement(false, chunks, content_bytes, window_chunks),
         };
 
         for event in decoder.feed(text) {
-            timing.observe_event();
+            let now = timing.observe_event();
             if event == "[DONE]" {
                 saw_done = true;
                 continue;
             }
             let payload: ChunkPayload = match serde_json::from_str(&event) {
                 Ok(payload) => payload,
-                Err(_) => return timing.measurement(false, chunks, content_bytes),
+                Err(_) => return timing.measurement(false, chunks, content_bytes, window_chunks),
             };
             let Some(choice) = payload.choices.first() else {
-                return timing.measurement(false, chunks, content_bytes);
+                return timing.measurement(false, chunks, content_bytes, window_chunks);
             };
             if !choice.delta.content.is_empty() {
                 chunks += 1;
                 content_bytes += choice.delta.content.len();
+                if now <= window_end {
+                    window_chunks += 1;
+                }
             }
         }
     }
 
-    timing.measurement(saw_done, chunks, content_bytes)
+    timing.measurement(saw_done, chunks, content_bytes, window_chunks)
 }
 
 pub async fn run_one_hyper_request(
@@ -380,12 +397,13 @@ pub async fn run_one_hyper_request(
     config: &Config,
     worker_index: usize,
     sequence: usize,
+    window_end: Instant,
 ) -> Measurement {
     let started = Instant::now();
     let timing = StreamTiming::new(started);
     let body = match serde_json::to_vec(&config.request_payload(worker_index, sequence, "rust")) {
         Ok(body) => body,
-        Err(_) => return timing.measurement(false, 0, 0),
+        Err(_) => return timing.measurement(false, 0, 0, 0),
     };
 
     let request = match Request::post(config.endpoint())
@@ -393,61 +411,69 @@ pub async fn run_one_hyper_request(
         .body(Full::new(Bytes::from(body)))
     {
         Ok(request) => request,
-        Err(_) => return timing.measurement(false, 0, 0),
+        Err(_) => return timing.measurement(false, 0, 0, 0),
     };
 
     let response = match client.request(request).await {
         Ok(response) => response,
-        Err(_) => return timing.measurement(false, 0, 0),
+        Err(_) => return timing.measurement(false, 0, 0, 0),
     };
 
     if !response.status().is_success() {
-        return timing.measurement(false, 0, 0);
+        return timing.measurement(false, 0, 0, 0);
     }
 
-    drain_hyper_body(timing, response.into_body()).await
+    drain_hyper_body(timing, response.into_body(), window_end).await
 }
 
-async fn drain_hyper_body(mut timing: StreamTiming, mut body: Incoming) -> Measurement {
+async fn drain_hyper_body(
+    mut timing: StreamTiming,
+    mut body: Incoming,
+    window_end: Instant,
+) -> Measurement {
     let mut decoder = SseDecoder::new();
     let mut chunks = 0;
     let mut content_bytes = 0;
+    let mut window_chunks = 0;
     let mut saw_done = false;
 
     while let Some(next) = body.frame().await {
         let frame = match next {
             Ok(frame) => frame,
-            Err(_) => return timing.measurement(false, chunks, content_bytes),
+            Err(_) => return timing.measurement(false, chunks, content_bytes, window_chunks),
         };
         let Some(data) = frame.data_ref() else {
             continue;
         };
         let text = match std::str::from_utf8(data) {
             Ok(text) => text,
-            Err(_) => return timing.measurement(false, chunks, content_bytes),
+            Err(_) => return timing.measurement(false, chunks, content_bytes, window_chunks),
         };
 
         for event in decoder.feed(text) {
-            timing.observe_event();
+            let now = timing.observe_event();
             if event == "[DONE]" {
                 saw_done = true;
                 continue;
             }
             let payload: ChunkPayload = match serde_json::from_str(&event) {
                 Ok(payload) => payload,
-                Err(_) => return timing.measurement(false, chunks, content_bytes),
+                Err(_) => return timing.measurement(false, chunks, content_bytes, window_chunks),
             };
             let Some(choice) = payload.choices.first() else {
-                return timing.measurement(false, chunks, content_bytes);
+                return timing.measurement(false, chunks, content_bytes, window_chunks);
             };
             if !choice.delta.content.is_empty() {
                 chunks += 1;
                 content_bytes += choice.delta.content.len();
+                if now <= window_end {
+                    window_chunks += 1;
+                }
             }
         }
     }
 
-    timing.measurement(saw_done, chunks, content_bytes)
+    timing.measurement(saw_done, chunks, content_bytes, window_chunks)
 }
 
 pub async fn run_one_drain_request(
@@ -455,13 +481,14 @@ pub async fn run_one_drain_request(
     config: &Config,
     worker_index: usize,
     sequence: usize,
+    window_end: Instant,
 ) -> Measurement {
     let started = Instant::now();
     let mut timing = StreamTiming::new(started);
     let body =
         match serde_json::to_vec(&config.request_payload(worker_index, sequence, "rust-drain")) {
             Ok(body) => body,
-            Err(_) => return timing.measurement(false, 0, 0),
+            Err(_) => return timing.measurement(false, 0, 0, 0),
         };
 
     let request = match Request::post(config.endpoint())
@@ -469,26 +496,39 @@ pub async fn run_one_drain_request(
         .body(Full::new(Bytes::from(body)))
     {
         Ok(request) => request,
-        Err(_) => return timing.measurement(false, 0, 0),
+        Err(_) => return timing.measurement(false, 0, 0, 0),
     };
 
     let response = match client.request(request).await {
         Ok(response) => response,
-        Err(_) => return timing.measurement(false, 0, 0),
+        Err(_) => return timing.measurement(false, 0, 0, 0),
     };
     if !response.status().is_success() {
-        return timing.measurement(false, 0, 0);
+        return timing.measurement(false, 0, 0, 0);
     }
 
     let mut incoming = response.into_body();
     let mut counter = EventBoundaryCounter::new();
     let mut total_events = 0usize;
     let mut wire_bytes = 0usize;
+    // Frame-granular: drain can't timestamp individual content chunks, only
+    // event boundaries as frames arrive. in_window_boundaries counts
+    // boundaries observed at or before window_end (role + content + finish +
+    // [DONE], whichever arrived in time).
+    let mut in_window_boundaries = 0usize;
 
     while let Some(next) = incoming.frame().await {
         let frame = match next {
             Ok(frame) => frame,
-            Err(_) => return timing.measurement(false, total_events.saturating_sub(3), wire_bytes),
+            Err(_) => {
+                let total_content = total_events.saturating_sub(3);
+                return timing.measurement(
+                    false,
+                    total_content,
+                    wire_bytes,
+                    total_content.min(in_window_boundaries),
+                );
+            }
         };
         let Some(data) = frame.data_ref() else {
             continue;
@@ -496,13 +536,22 @@ pub async fn run_one_drain_request(
         wire_bytes += data.len();
         let boundaries = counter.feed(data);
         if boundaries > 0 {
-            timing.observe_event();
+            let now = timing.observe_event();
             total_events += boundaries;
+            if now <= window_end {
+                in_window_boundaries += boundaries;
+            }
         }
     }
 
     // role + finish + [DONE] are not content chunks.
-    timing.measurement(true, total_events.saturating_sub(3), wire_bytes)
+    let total_content = total_events.saturating_sub(3);
+    // window_chunks: min() of the true content count and in-window boundary
+    // count. Exact when the stream completed inside the window (boundaries
+    // == chunks + 3, so min = chunks); when the window clips mid-stream this
+    // overcounts by at most 1 (the role event boundary) out of ~512.
+    let window_chunks = total_content.min(in_window_boundaries);
+    timing.measurement(true, total_content, wire_bytes, window_chunks)
 }
 
 #[derive(Clone)]
@@ -536,23 +585,27 @@ async fn run_one(
     config: &Config,
     worker_index: usize,
     sequence: usize,
+    window_end: Instant,
 ) -> Measurement {
     match client {
         AnyClient::Reqwest(inner) => {
-            run_one_reqwest_request(inner, config, worker_index, sequence).await
+            run_one_reqwest_request(inner, config, worker_index, sequence, window_end).await
         }
         AnyClient::Hyper(inner) => {
-            run_one_hyper_request(inner, config, worker_index, sequence).await
+            run_one_hyper_request(inner, config, worker_index, sequence, window_end).await
         }
         AnyClient::Drain(inner) => {
-            run_one_drain_request(inner, config, worker_index, sequence).await
+            run_one_drain_request(inner, config, worker_index, sequence, window_end).await
         }
     }
 }
 
 pub async fn run_for(client: AnyClient, config: Config, seconds: f64) -> (Vec<Measurement>, f64) {
     let started = Instant::now();
-    let deadline = started + Duration::from_secs_f64(seconds);
+    // window_end is the measured window's absolute deadline: the closed-loop
+    // worker loop below owns started+seconds and passes it into every
+    // per-request call so window-clipped counting can compare against it.
+    let window_end = started + Duration::from_secs_f64(seconds);
     let mut handles = Vec::with_capacity(config.concurrency);
 
     for worker_index in 0..config.concurrency {
@@ -561,8 +614,9 @@ pub async fn run_for(client: AnyClient, config: Config, seconds: f64) -> (Vec<Me
         handles.push(tokio::spawn(async move {
             let mut measurements = Vec::new();
             let mut sequence = 0usize;
-            while Instant::now() < deadline {
-                measurements.push(run_one(&client, &config, worker_index, sequence).await);
+            while Instant::now() < window_end {
+                measurements
+                    .push(run_one(&client, &config, worker_index, sequence, window_end).await);
                 sequence += 1;
             }
             measurements
@@ -631,6 +685,7 @@ pub fn aggregate_summary(
     let mut failed_requests = 0usize;
     let mut total_chunks = 0usize;
     let mut total_bytes = 0usize;
+    let mut total_window_chunks = 0usize;
 
     let ideal_stream_ms = if config.events_per_second > 0 && expected > 1 {
         (expected - 1) as f64 / config.events_per_second as f64 * 1000.0
@@ -639,6 +694,10 @@ pub fn aggregate_summary(
     };
 
     for measurement in measurements {
+        // window_chunks is summed over ALL measurements (including failed and
+        // incomplete) — that is the point of window-clipped counting: a
+        // straggling worker cannot dilute the aggregate.
+        total_window_chunks += measurement.window_chunks;
         if !measurement.ok {
             failed_requests += 1;
             continue;
@@ -659,13 +718,17 @@ pub fn aggregate_summary(
     }
 
     let duration_seconds = duration_ms / 1000.0;
-    let (requests_per_second, chunks_per_second) = if duration_seconds > 0.0 {
-        (
-            successful_requests as f64 / duration_seconds,
-            total_chunks as f64 / duration_seconds,
-        )
+    let requests_per_second = if duration_seconds > 0.0 {
+        successful_requests as f64 / duration_seconds
     } else {
-        (0.0, 0.0)
+        0.0
+    };
+    // Window-clipped: divide by the CONFIGURED duration, not the (possibly
+    // straggler-stretched) actual duration.
+    let chunks_per_second = if config.duration_seconds > 0.0 {
+        total_window_chunks as f64 / config.duration_seconds
+    } else {
+        0.0
     };
     let ideal_events_per_second = if config.events_per_second > 0 {
         let ideal_request_seconds = config.ttfc_ms as f64 / 1000.0

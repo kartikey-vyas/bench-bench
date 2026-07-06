@@ -1,4 +1,5 @@
 import asyncio
+import time
 import unittest
 
 from bench_harness.config import WorkloadConfig
@@ -62,19 +63,29 @@ def make_config(chunks=3):
 class RunOneRequestTests(unittest.TestCase):
     def test_counts_content_chunks_and_completes(self):
         pieces = stream_pieces(3, "xxxx")
-        m = asyncio.run(run_one_request(FakeClient(pieces), make_config(3), 0, 0))
+        window_end = time.perf_counter() + 60
+        m = asyncio.run(run_one_request(FakeClient(pieces), make_config(3), 0, 0, window_end))
         self.assertTrue(m.ok)
         self.assertEqual(m.chunks, 3)          # role/finish events not counted
         self.assertEqual(m.bytes, 12)
+        self.assertEqual(m.window_chunks, m.chunks)
         self.assertGreater(m.first_chunk_ms, 0.0)
         self.assertGreaterEqual(m.stream_ms, 0.0)
         self.assertGreaterEqual(m.max_gap_ms, 0.0)
 
     def test_missing_done_marks_not_ok(self):
         pieces = stream_pieces(3, "xxxx")[:-1]
-        m = asyncio.run(run_one_request(FakeClient(pieces), make_config(3), 0, 0))
+        window_end = time.perf_counter() + 60
+        m = asyncio.run(run_one_request(FakeClient(pieces), make_config(3), 0, 0, window_end))
         self.assertFalse(m.ok)
         self.assertEqual(m.chunks, 3)
+
+    def test_window_end_in_past_yields_zero_window_chunks(self):
+        pieces = stream_pieces(3, "xxxx")
+        m = asyncio.run(run_one_request(FakeClient(pieces), make_config(3), 0, 0, 0.0))
+        self.assertTrue(m.ok)
+        self.assertEqual(m.chunks, 3)
+        self.assertEqual(m.window_chunks, 0)
 
 
 if __name__ == "__main__":

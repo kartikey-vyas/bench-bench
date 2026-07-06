@@ -72,13 +72,20 @@ fn test_config(concurrency: usize, chunks: usize, events_per_second: u64) -> Con
     }
 }
 
-fn measurement(ok: bool, chunks: usize, stream_ms: f64, max_gap_ms: f64) -> Measurement {
+fn measurement(
+    ok: bool,
+    chunks: usize,
+    stream_ms: f64,
+    max_gap_ms: f64,
+    window_chunks: usize,
+) -> Measurement {
     Measurement {
         ok,
         latency_ms: 50.0,
         first_chunk_ms: 10.0,
         chunks,
         bytes: chunks * 8,
+        window_chunks,
         max_gap_ms,
         stream_ms,
     }
@@ -88,9 +95,9 @@ fn measurement(ok: bool, chunks: usize, stream_ms: f64, max_gap_ms: f64) -> Meas
 fn aggregate_summary_classifies_and_computes_efficiency() {
     let config = test_config(2, 4, 100);
     let measurements = vec![
-        measurement(true, 4, 30.0, 12.0),
-        measurement(true, 3, 28.0, 15.0), // incomplete: ok but wrong chunk count
-        measurement(false, 0, 0.0, 0.0),
+        measurement(true, 4, 30.0, 12.0, 4),
+        measurement(true, 3, 28.0, 15.0, 3), // incomplete: ok but wrong chunk count
+        measurement(false, 0, 0.0, 0.0, 0),
     ];
 
     let summary = aggregate_summary(&measurements, 1000.0, &config);
@@ -98,8 +105,12 @@ fn aggregate_summary_classifies_and_computes_efficiency() {
     assert_eq!(summary.successful_requests, 1);
     assert_eq!(summary.incomplete_requests, 1);
     assert_eq!(summary.failed_requests, 1);
+    // window-clipped: chunks_per_second sums window_chunks over ALL
+    // measurements (4+3+0=7) divided by the CONFIGURED duration_seconds
+    // (1.0), not total_chunks/actual-duration.
+    assert!((summary.chunks_per_second - 7.0).abs() < 1e-9);
     assert!((summary.ideal_events_per_second - 266.6666666666667).abs() < 1e-6);
-    assert!((summary.efficiency - 0.015).abs() < 1e-9);
+    assert!((summary.efficiency - 0.02625).abs() < 1e-9);
     assert!((summary.p50_stream_stretch - 1.0).abs() < 1e-9);
     assert_eq!(summary.max_max_gap_ms, 12.0);
 }
@@ -107,7 +118,7 @@ fn aggregate_summary_classifies_and_computes_efficiency() {
 #[test]
 fn aggregate_summary_unpaced_has_zero_ideal_and_stretch() {
     let config = test_config(2, 4, 0);
-    let summary = aggregate_summary(&[measurement(true, 4, 30.0, 1.0)], 1000.0, &config);
+    let summary = aggregate_summary(&[measurement(true, 4, 30.0, 1.0, 4)], 1000.0, &config);
     assert_eq!(summary.ideal_events_per_second, 0.0);
     assert_eq!(summary.efficiency, 0.0);
     assert_eq!(summary.p50_stream_stretch, 0.0);
