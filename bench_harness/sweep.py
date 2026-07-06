@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import resource
 import shutil
@@ -13,8 +14,19 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
+
+# Python client variants: sweep name -> (module, required imports). Defined
+# ahead of SweepConfig so KNOWN_CLIENTS is available to SweepConfig.validate().
+PYTHON_VARIANTS = {
+    "python": ("bench_harness.python_client", ("httpx",)),
+    "python-deferred": ("bench_harness.python_deferred_client", ("httpx",)),
+    "python-openai": ("bench_harness.python_openai_client", ("httpx", "openai")),
+}
+
+KNOWN_CLIENTS = set(PYTHON_VARIANTS) | {"go", "rust-reqwest", "rust-hyper", "drain"}
 
 
 @dataclass(frozen=True)
@@ -49,16 +61,92 @@ class SweepConfig:
 
     @classmethod
     def from_path(cls, path: str | Path) -> "SweepConfig":
-        data = json.loads(Path(path).read_text())
-        tiers = tuple(SweepTier(**tier) for tier in data.pop("tiers"))
-        concurrencies = tuple(data.pop("concurrencies"))
-        clients = tuple(data.pop("clients"))
-        worker_threads = data.get("server_worker_threads")
-        if worker_threads is not None and worker_threads <= 0:
-            raise ValueError(
-                f"server_worker_threads must be None or > 0, got {worker_threads!r}"
+        raw = json.loads(Path(path).read_text())
+        provided = set(raw.keys())
+        data = dict(raw)
+        tiers_raw = data.pop("tiers", None)
+        concurrencies_raw = data.pop("concurrencies", None)
+        clients_raw = data.pop("clients", None)
+        try:
+            kwargs: dict[str, Any] = data
+            if tiers_raw is not None:
+                kwargs["tiers"] = tuple(SweepTier(**tier) for tier in tiers_raw)
+            if concurrencies_raw is not None:
+                kwargs["concurrencies"] = tuple(concurrencies_raw)
+            if clients_raw is not None:
+                kwargs["clients"] = tuple(clients_raw)
+            config = cls(**kwargs)
+        except TypeError as error:
+            field_names = {field.name for field in dataclasses.fields(cls)}
+            unknown = sorted(provided - field_names)
+            required = {
+                field.name
+                for field in dataclasses.fields(cls)
+                if field.default is dataclasses.MISSING
+                and field.default_factory is dataclasses.MISSING  # type: ignore[comparison-overlap]
+            }
+            missing = sorted(required - provided)
+            details = []
+            if unknown:
+                details.append(f"unknown key(s): {', '.join(unknown)}")
+            if missing:
+                details.append(f"missing key(s): {', '.join(missing)}")
+            if not details:
+                details.append(str(error))
+            raise ValueError(f"invalid sweep config {path}: {'; '.join(details)}") from error
+        config.validate()
+        return config
+
+    def validate(self) -> None:
+        """Fail fast with a readable, all-in-one-shot error rather than a
+        confusing crash deep inside the sweep loop or a subprocess."""
+        problems: list[str] = []
+
+        if not self.concurrencies:
+            problems.append("concurrencies must be non-empty")
+        else:
+            if any(c <= 0 for c in self.concurrencies):
+                problems.append(f"concurrencies must all be positive, got {list(self.concurrencies)}")
+            if list(self.concurrencies) != sorted(self.concurrencies):
+                problems.append(f"concurrencies must be ascending, got {list(self.concurrencies)}")
+
+        if self.repeats < 1:
+            problems.append(f"repeats must be >= 1, got {self.repeats}")
+        if self.duration_seconds <= 0:
+            problems.append(f"duration_seconds must be > 0, got {self.duration_seconds}")
+        if self.warmup_seconds < 0:
+            problems.append(f"warmup_seconds must be >= 0, got {self.warmup_seconds}")
+        if self.cooldown_seconds < 0:
+            problems.append(f"cooldown_seconds must be >= 0, got {self.cooldown_seconds}")
+        if self.chunks_per_response <= 0:
+            problems.append(f"chunks_per_response must be > 0, got {self.chunks_per_response}")
+        if self.chunk_bytes <= 0:
+            problems.append(f"chunk_bytes must be > 0, got {self.chunk_bytes}")
+        if not (0.0 <= self.stop_failure_fraction <= 1.0):
+            problems.append(
+                f"stop_failure_fraction must be in [0, 1], got {self.stop_failure_fraction}"
             )
-        return cls(tiers=tiers, concurrencies=concurrencies, clients=clients, **data)
+        for tier in self.tiers:
+            if tier.events_per_second < 0:
+                problems.append(
+                    f"tier {tier.name!r}: events_per_second must be >= 0, got {tier.events_per_second}"
+                )
+            if tier.ttfc_ms < 0:
+                problems.append(f"tier {tier.name!r}: ttfc_ms must be >= 0, got {tier.ttfc_ms}")
+
+        if self.server_worker_threads is not None and self.server_worker_threads <= 0:
+            problems.append(
+                f"server_worker_threads must be None or > 0, got {self.server_worker_threads!r}"
+            )
+
+        unknown_clients = sorted(set(self.clients) - KNOWN_CLIENTS)
+        if unknown_clients:
+            problems.append(
+                f"unknown client(s) {unknown_clients}; known clients are {sorted(KNOWN_CLIENTS)}"
+            )
+
+        if problems:
+            raise ValueError("; ".join(problems))
 
     def as_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -310,14 +398,6 @@ def server_command(sweep: SweepConfig, binaries: dict[str, Path], bind: str) -> 
     return command
 
 
-# Python client variants: sweep name -> (module, required imports).
-PYTHON_VARIANTS = {
-    "python": ("bench_harness.python_client", ("httpx",)),
-    "python-deferred": ("bench_harness.python_deferred_client", ("httpx",)),
-    "python-openai": ("bench_harness.python_openai_client", ("httpx", "openai")),
-}
-
-
 def client_command(name: str, binaries: dict[str, Path], config_path: Path, out_dir: Path) -> list[str]:
     if name in PYTHON_VARIANTS:
         module, _ = PYTHON_VARIANTS[name]
@@ -423,12 +503,34 @@ def missing_python_modules(clients: tuple[str, ...]) -> list[str]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run a tier x concurrency benchmark sweep.")
-    parser.add_argument("--config", default="config/sweep.default.json", help="Path to sweep JSON.")
-    parser.add_argument("--bind", default="127.0.0.1:8080", help="Server bind address.")
-    parser.add_argument("--results-dir", default="results", help="Root directory for run output.")
+    parser.add_argument(
+        "--config",
+        default="config/sweep.default.json",
+        help="Path to sweep JSON, resolved against the repo root (default: %(default)s).",
+    )
+    parser.add_argument(
+        "--bind",
+        default="127.0.0.1:8080",
+        help="Server bind address (default: %(default)s).",
+    )
+    parser.add_argument(
+        "--results-dir",
+        default="results",
+        help="Root directory for run output (default: %(default)s).",
+    )
     args = parser.parse_args()
 
     sweep = SweepConfig.from_path(ROOT / args.config)
+
+    base_host_port = urlparse(sweep.base_url).netloc
+    if args.bind != base_host_port:
+        print(
+            f"error: --bind {args.bind} disagrees with config base_url {sweep.base_url}; "
+            "clients and health checks use base_url — pass a config whose base_url "
+            "matches or omit --bind",
+            file=sys.stderr,
+        )
+        return 2
 
     missing = missing_python_modules(sweep.clients)
     if missing:

@@ -10,20 +10,30 @@ from pathlib import Path
 from typing import Any
 
 
+# NOTE: this order/color mapping duplicates CLIENT_ORDER/CLIENT_STYLE in
+# bench_harness/sweep_report.py (the concurrency-sweep report). No shared
+# registry yet — deferred until after the Linux sweep run; if you touch one,
+# check whether the other needs the same update.
 RUN_DIR_RE = re.compile(r"^\d{8}T\d{6}Z$")
 
 IMPLEMENTATION_ORDER = {
-    ("python", "asyncio-httpx"): 0,
-    ("go", "net-http-goroutines"): 1,
-    ("rust", "reqwest-tokio"): 2,
-    ("rust", "hyper-tokio"): 3,
+    ("python", "asyncio-openai-sdk"): 0,
+    ("python", "asyncio-httpx"): 1,
+    ("python", "asyncio-httpx-deferred"): 2,
+    ("go", "net-http-goroutines"): 3,
+    ("rust", "reqwest-tokio"): 4,
+    ("rust", "hyper-tokio"): 5,
+    ("rust", "drain-hyper"): 6,
 }
 
 IMPLEMENTATION_COLORS = {
-    "Python asyncio-httpx": "#4b5563",
-    "Go net-http-goroutines": "#0f766e",
-    "Rust reqwest-tokio": "#b45309",
-    "Rust hyper-tokio": "#2563eb",
+    "Python asyncio-openai-sdk": "#4a3aa7",
+    "Python asyncio-httpx": "#2a78d6",
+    "Python asyncio-httpx-deferred": "#e34948",
+    "Go net-http-goroutines": "#1baf7a",
+    "Rust reqwest-tokio": "#eda100",
+    "Rust hyper-tokio": "#008300",
+    "Rust drain-hyper": "#898781",
 }
 
 

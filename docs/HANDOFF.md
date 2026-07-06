@@ -33,7 +33,7 @@ python-openai collapses?
 
 A Rust Axum server streams synthetic OpenAI-style SSE chat completions with exactly controlled timing (`ttfc_ms` delay before the first event, `events_per_second` per-request rate, deadline-based schedule with catch-up bursts). Seven clients (python-openai/official SDK, python/httpx, python-deferred/raw-bytes-then-decode, go/net-http, rust-reqwest, rust-hyper, and `drain` — a parse-free reference that only counts bytes) run closed-loop workers for fixed wall-clock windows. The OpenAI SDK client passes the server's pacing fields via `extra_body`, so the SDK speaks to the synthetic server unmodified. `scripts/run_sweep.py` walks tier × concurrency × repeat × client cells with stop rules; `scripts/generate_sweep_report.py` renders efficiency-vs-concurrency charts. Goal: find the concurrency at which each client stops faithfully representing the server ("knee").
 
-Full design + contracts (wire protocol, 25-key summary schema, aggregation rules, amended efficiency ideal): `docs/superpowers/plans/2026-07-03-paced-streaming-sweep.md` — the **Shared Contracts** section is the source of truth. Efficiency = observed events/s ÷ achievable closed-loop ideal = `concurrency × chunks / (ttfc + (chunks−1)/rate)`.
+Contracts (wire protocol, 25-key summary schema, aggregation rules, amended efficiency ideal): `docs/CONTRACTS.md` is the source of truth. Full design history and per-task rationale: `docs/superpowers/plans/2026-07-03-paced-streaming-sweep.md`. Efficiency = observed events/s ÷ achievable closed-loop ideal = `concurrency × chunks / (ttfc + (chunks−1)/rate)`.
 
 ## Interpretation rules (memorize these before reading results)
 
@@ -56,7 +56,7 @@ Full design + contracts (wire protocol, 25-key summary schema, aggregation rules
 2. Stop rules act on diluted numbers mid-sweep (consequence of #1).
 3. `CpuSampler` uses `ps -o %cpu` (decaying average on macOS; on Linux it's total-lifetime average) — treat CPU numbers as indicative. A proper interval sampler (delta of utime/stime from /proc) would be better on Linux.
 4. Workers are phase-locked (all start at t=0 with identical cycle lengths), so connect bursts recur in lockstep — python's TTFC knee partially reflects synchronized arrivals. Optional: stagger worker start by i×(cycle/N).
-5. Minor deferred review findings are listed at the end of `.superpowers/sdd/progress.md` (untracked scratch; consult git log if absent).
+5. Minor deferred review findings: upper-bound validation tests are missing (e.g. no test asserts a rejection at the server's documented `chunks`/`chunk_bytes`/`ttfc_ms`/`events_per_second` maxima); negative-path config tests are sparse outside the sweep config validator. The report's series-label layout has a latent clamp edge once a merged report carries 20+ series (labels may overlap) — not yet hit in practice, not yet tested.
 
 ## Runbook: dedicated Linux machine
 
@@ -79,7 +79,7 @@ Notes:
 - The runner builds all binaries, starts the server itself (port 8080), raises RLIMIT_NOFILE, writes `results/<UTC>/…` incrementally (`sweep.json` survives crashes/ctrl-C), and prints `[N/total]` progress with ETA.
 - The python client MUST run under the venv interpreter (the runner fails fast with exit 2 if httpx is missing — that is the designed behavior, not a bug).
 - Profile ceiling: 12 rungs × 5 tiers × 3 repeats × 7 clients ≈ 1260 runs, ~5.5h+ ceiling for `sweep.linux.json`; stop rules prune. `make sweep-smoke` (~30s) is the sanity gate after any change.
-- Cooldowns are 5s; at high rungs watch for TIME_WAIT/ephemeral-port pressure if failures appear at c≥768 (failures at high rungs only = environment, per interpretation rule 4).
+- Cooldowns are 5s; at high rungs watch for TIME_WAIT/ephemeral-port pressure if failures appear at c≥768 (failures at high rungs only = environment — cross-check per interpretation rules).
 - Interesting numbers to extract: drain's curve on isolated server cores = the Rust server's true delivery ceiling; whether go vs rust separate at 384–1024 once dilution and contention are gone.
 
 ## Per-core capacity + core-scaling series (optional second experiment)

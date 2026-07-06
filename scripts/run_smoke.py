@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 import subprocess
 import sys
@@ -135,6 +136,35 @@ def run_clients(config: Path, run_dir: Path) -> int:
     return failures
 
 
+def summaries_share_schema(run_dir: Path) -> bool:
+    """Assert every client's summary.json under run_dir has the identical
+    sorted key set in `summary`. All clients must emit byte-key-identical
+    summaries (the cross-language contract, see docs/CONTRACTS.md) — a schema
+    drift here would otherwise slip through silently until a report or a
+    downstream consumer chokes on a missing key."""
+    schemas: dict[str, list[str]] = {}
+    for path in sorted(run_dir.glob("**/summary.json")):
+        data = json.loads(path.read_text())
+        schemas[path.parent.name] = sorted(data.get("summary", {}).keys())
+
+    if not schemas:
+        return True
+
+    reference_client, reference_keys = next(iter(schemas.items()))
+    ok = True
+    for client, keys in schemas.items():
+        if keys != reference_keys:
+            missing = sorted(set(reference_keys) - set(keys))
+            extra = sorted(set(keys) - set(reference_keys))
+            print(
+                f"schema mismatch: {client} summary keys differ from {reference_client} "
+                f"(missing: {missing or 'none'}, extra: {extra or 'none'})",
+                file=sys.stderr,
+            )
+            ok = False
+    return ok
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run a local smoke benchmark against the synthetic server.")
     parser.add_argument("--config", default="config/workload.smoke.json", help="Path to workload JSON.")
@@ -156,6 +186,8 @@ def main() -> int:
     try:
         wait_for_health(f"http://{args.bind}/health")
         failures = run_clients(config, run_dir)
+        if not summaries_share_schema(run_dir):
+            failures += 1
         compare_exit = run_command([sys.executable, str(ROOT / "scripts" / "compare_results.py"), str(run_dir)])
         return failures or compare_exit
     finally:

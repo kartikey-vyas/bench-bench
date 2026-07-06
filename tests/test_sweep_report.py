@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.generate_sweep_report import aggregate_cells, load_cells, render_report, write_report
+from bench_harness.sweep_report import aggregate_cells, load_cells, render_report, write_report
 
 
 def write_cell(root: Path, tier: str, concurrency: int, repeat: int, client: str,

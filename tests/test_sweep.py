@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.run_sweep import (
+from bench_harness.sweep import (
     SweepConfig,
     SweepProgress,
     SweepTier,
@@ -17,6 +17,27 @@ from scripts.run_sweep import (
     stop_reason,
     taskset_prefix,
 )
+
+
+def valid_sweep_json(**overrides):
+    data = {
+        "base_url": "http://127.0.0.1:8080",
+        "tiers": [{"name": "max", "events_per_second": 0, "ttfc_ms": 0}],
+        "concurrencies": [1, 2],
+        "clients": ["python"],
+        "duration_seconds": 1.0,
+        "warmup_seconds": 0.0,
+        "repeats": 1,
+        "cooldown_seconds": 0.0,
+        "chunks_per_response": 16,
+        "chunk_bytes": 8,
+        "stop_efficiency_below": 0.9,
+        "stop_ttfc_excess_p95_ms": 100.0,
+        "stop_failure_fraction": 0.001,
+        "output_dir": "results",
+    }
+    data.update(overrides)
+    return data
 
 
 def sweep_config(**overrides):
@@ -98,6 +119,40 @@ class SweepConfigTests(unittest.TestCase):
                 }))
                 with self.assertRaises(ValueError):
                     SweepConfig.from_path(path)
+
+    def test_from_path_rejects_unknown_key(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "sweep.json"
+            path.write_text(json.dumps(valid_sweep_json(bogus_field="nope")))
+            with self.assertRaises(ValueError) as ctx:
+                SweepConfig.from_path(path)
+        self.assertIn("bogus_field", str(ctx.exception))
+
+    def test_from_path_rejects_missing_key(self):
+        data = valid_sweep_json()
+        del data["duration_seconds"]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "sweep.json"
+            path.write_text(json.dumps(data))
+            with self.assertRaises(ValueError) as ctx:
+                SweepConfig.from_path(path)
+        self.assertIn("duration_seconds", str(ctx.exception))
+
+    def test_from_path_rejects_unknown_client(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "sweep.json"
+            path.write_text(json.dumps(valid_sweep_json(clients=["python", "carrier-pigeon"])))
+            with self.assertRaises(ValueError) as ctx:
+                SweepConfig.from_path(path)
+        self.assertIn("carrier-pigeon", str(ctx.exception))
+
+    def test_from_path_rejects_descending_concurrencies(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "sweep.json"
+            path.write_text(json.dumps(valid_sweep_json(concurrencies=[4, 1])))
+            with self.assertRaises(ValueError) as ctx:
+                SweepConfig.from_path(path)
+        self.assertIn("concurrencies", str(ctx.exception))
 
     def test_build_workload_maps_tier_and_concurrency(self):
         sweep = sweep_config()
@@ -216,7 +271,7 @@ class CpuAllocationTests(unittest.TestCase):
 
     def test_server_command_with_worker_threads_and_pinning(self):
         sweep = sweep_config(server_worker_threads=8, server_cpus="0-7")
-        with patch("scripts.run_sweep.shutil.which", return_value="/usr/bin/taskset"):
+        with patch("bench_harness.sweep.shutil.which", return_value="/usr/bin/taskset"):
             command = server_command(sweep, {"server": Path("/bin/server")}, "127.0.0.1:8080")
         self.assertEqual(
             command,
@@ -225,19 +280,19 @@ class CpuAllocationTests(unittest.TestCase):
         )
 
     def test_taskset_prefix_degrades_without_taskset(self):
-        with patch("scripts.run_sweep.shutil.which", return_value=None):
+        with patch("bench_harness.sweep.shutil.which", return_value=None):
             self.assertEqual(taskset_prefix("0-7"), [])
         self.assertEqual(taskset_prefix(None), [])
 
 
 class PythonClientReadyTests(unittest.TestCase):
     def test_missing_httpx_returns_false(self):
-        with patch("scripts.run_sweep.subprocess.run") as mock_run:
+        with patch("bench_harness.sweep.subprocess.run") as mock_run:
             mock_run.return_value.returncode = 1
             self.assertFalse(python_client_ready())
 
     def test_importable_httpx_returns_true(self):
-        with patch("scripts.run_sweep.subprocess.run") as mock_run:
+        with patch("bench_harness.sweep.subprocess.run") as mock_run:
             mock_run.return_value.returncode = 0
             self.assertTrue(python_client_ready())
 

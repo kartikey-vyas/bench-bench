@@ -13,6 +13,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 RUN_DIR_RE = re.compile(r"^\d{8}T\d{6}Z$")
 
+# NOTE: this palette/order duplicates IMPLEMENTATION_ORDER/IMPLEMENTATION_COLORS
+# in scripts/generate_report.py (the single-run report). No shared registry
+# yet — deferred until after the Linux sweep run; if you touch one, check
+# whether the other needs the same update.
+#
 # Reference dataviz palette, fixed slot order (validated for CVD separation).
 # Drain is the neutral reference, not a categorical slot.
 CLIENT_STYLE = {
