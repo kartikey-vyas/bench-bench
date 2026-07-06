@@ -6,7 +6,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from bench_harness.sweep_report import aggregate_cells, load_cells, render_report, write_report
+from bench_harness.sweep_report import (
+    aggregate_cells,
+    decade_ticks,
+    load_cells,
+    process_count,
+    render_report,
+    write_report,
+)
 
 
 def write_cell(root: Path, tier: str, concurrency: int, repeat: int, client: str,
@@ -175,15 +182,103 @@ class SweepReportTests(unittest.TestCase):
 
         svg_fragments = html.split("<svg")[1:]
         self.assertTrue(svg_fragments)
+        # Heatmaps, scatters, and band multiples legitimately carry no direct
+        # labels; the collision rule applies to every chart that has them, and
+        # at least one chart in the report must.
+        labeled_fragments = 0
         for fragment in svg_fragments:
             y_values = [
                 float(y)
                 for y in re.findall(r'<text x="[^"]+" y="([0-9.]+)" class="direct-label"', fragment)
             ]
-            self.assertGreaterEqual(len(y_values), 1)
+            if not y_values:
+                continue
+            labeled_fragments += 1
             y_values.sort()
             for prev, curr in zip(y_values, y_values[1:]):
                 self.assertGreaterEqual(curr - prev, 13.5)
+        self.assertGreaterEqual(labeled_fragments, 1)
+
+
+class NewChartTests(unittest.TestCase):
+    def test_process_count_from_registry(self):
+        self.assertEqual(process_count("python-openai-mp"), 12)
+        self.assertEqual(process_count("python-deferred-mp"), 12)
+        self.assertEqual(process_count("python-openai"), 1)
+        self.assertEqual(process_count("go"), 1)
+        self.assertEqual(process_count("unknown-legacy-client"), 1)
+
+    def test_decade_ticks_span_range(self):
+        self.assertEqual(decade_ticks(1.0, 3000.0), [1.0, 10.0, 100.0, 1000.0, 3000.0])
+        self.assertEqual(decade_ticks(1.0, 10.0), [1.0, 10.0])
+
+    def _paced_report(self, stops=None):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "run"
+            for concurrency, efficiency in ((64, 0.99), (128, 0.85)):
+                write_cell(root, "eps250", concurrency, 0, "python-openai", efficiency, eps=250)
+                write_cell(root, "eps250", concurrency, 0, "python-openai-mp", 0.99, eps=250)
+                write_cell(root, "eps250", concurrency, 0, "go", 0.999, eps=250)
+            write_cell(root, "eps250", 256, 0, "python-openai-mp", 0.98, eps=250)
+            write_cell(root, "eps250", 256, 0, "go", 0.999, eps=250)
+            sweep_meta = {"stops": stops or {}}
+            return render_report(root, load_cells(root), sweep_meta)
+
+    def test_new_sections_render(self):
+        html = self._paced_report()
+        self.assertIn("Client knee map", html)
+        self.assertIn("Absolute throughput", html)
+        self.assertIn("p99 max inter-chunk gap", html)
+        self.assertIn("CPU cost per delivered throughput", html)
+        self.assertIn("Failure modes", html)
+        self.assertIn("TTFC excess vs per-process load", html)
+        self.assertIn("TTFC excess percentiles per client", html)
+        self.assertIn("Server schedule slip", html)
+        self.assertIn("Server CPU", html)
+
+    def test_heatmap_marks_knee_and_pruned_cells(self):
+        html = self._paced_report(stops={
+            "eps250:python-openai": {"concurrency": 128, "reason": "efficiency 0.85 below 0.9"},
+        })
+        self.assertIn("STOPPED: efficiency 0.85 below 0.9", html)  # knee cell tooltip
+        self.assertIn("pruned by stop at c=128", html)             # c=256 cell hatched out
+        self.assertIn("heat-knee", html)
+        # Stop ✕ marker drawn on the line charts too.
+        self.assertIn('class="stopx series-python-openai"', html)
+
+    def test_cpu_chart_excludes_multiprocess_clients(self):
+        html = self._paced_report()
+        cpu_svg = next(
+            fragment for fragment in html.split("<svg")[1:]
+            if "CPU cost per delivered throughput" in fragment
+        )
+        self.assertIn("series-python-openai", cpu_svg)
+        self.assertNotIn("series-python-openai-mp", cpu_svg)
+
+    def test_collapse_curve_uses_per_process_load(self):
+        html = self._paced_report()
+        self.assertIn("(12 proc)", html)   # mp point annotated with process count
+        # c=128 across 12 workers ≈ 11 streams per process.
+        self.assertIn("11 streams/proc", html)
+        collapse_svg = next(
+            fragment for fragment in html.split("<svg")[1:]
+            if "per-process load" in fragment
+        )
+        self.assertNotIn("series-go", collapse_svg)  # python variants only
+
+    def test_band_grid_draws_percentile_polygon(self):
+        html = self._paced_report()
+        self.assertIn('class="band fill-python-openai"', html)
+        self.assertIn("p50 4.0 / p95 10.0 / p99 20.0 ms", html)  # fixture percentiles - 200ms ttfc
+
+    def test_unpaced_tier_keeps_simple_layout(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "run"
+            write_cell(root, "max", 4, 0, "go", 0.0, eps=0, ttfc=0)
+            html = render_report(root, load_cells(root), {})
+        self.assertIn("Observed events/sec", html)
+        self.assertNotIn("Client knee map", html)
+        self.assertNotIn("Failure modes", html)
 
 
 if __name__ == "__main__":
