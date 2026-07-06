@@ -1,0 +1,54 @@
+name: Deploy report to Pages
+
+# Publishes docs/ (the sweep report staged by `make publish-report`) to
+# GitHub Pages. Replaces the legacy branch-based Pages build, whose deploy
+# step failed transiently often enough to need babysitting; here the deploy
+# is retried twice with a backoff before the run is allowed to fail.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v5
+        continue-on-error: true
+      - name: Wait before retry
+        if: steps.deploy.outcome == 'failure'
+        run: sleep 30
+      - name: Deploy (retry 1)
+        id: retry1
+        if: steps.deploy.outcome == 'failure'
+        uses: actions/deploy-pages@v5
+        continue-on-error: true
+      - name: Wait before final retry
+        if: steps.deploy.outcome == 'failure' && steps.retry1.outcome == 'failure'
+        run: sleep 60
+      - name: Deploy (retry 2)
+        if: steps.deploy.outcome == 'failure' && steps.retry1.outcome == 'failure'
+        uses: actions/deploy-pages@v5
