@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import resource
+import shutil
 import subprocess
 import sys
 import threading
@@ -39,6 +40,12 @@ class SweepConfig:
     stop_ttfc_excess_p95_ms: float
     stop_failure_fraction: float
     output_dir: str
+    # CPU allocation (all optional). server_worker_threads caps the server's
+    # tokio runtime; server_cpus/client_cpus are `taskset -c` core lists
+    # (e.g. "0-7") applied on Linux so server and client don't fight for cores.
+    server_worker_threads: int | None = None
+    server_cpus: str | None = None
+    client_cpus: str | None = None
 
     @classmethod
     def from_path(cls, path: str | Path) -> "SweepConfig":
@@ -253,6 +260,33 @@ def build_binaries() -> dict[str, Path]:
     }
 
 
+def taskset_prefix(cpus: str | None) -> list[str]:
+    """`taskset -c <cpus>` prefix when core pinning is requested and available
+    (Linux). On macOS there is no taskset; warn once and run unpinned."""
+    if not cpus:
+        return []
+    if shutil.which("taskset") is None:
+        if cpus not in _warned_no_taskset:
+            _warned_no_taskset.add(cpus)
+            print(
+                f"warning: cpu pinning to {cpus!r} requested but taskset is not "
+                "available on this platform; running unpinned",
+                file=sys.stderr,
+            )
+        return []
+    return ["taskset", "-c", cpus]
+
+
+_warned_no_taskset: set[str] = set()
+
+
+def server_command(sweep: SweepConfig, binaries: dict[str, Path], bind: str) -> list[str]:
+    command = taskset_prefix(sweep.server_cpus) + [str(binaries["server"]), "--bind", bind]
+    if sweep.server_worker_threads is not None:
+        command += ["--worker-threads", str(sweep.server_worker_threads)]
+    return command
+
+
 def client_command(name: str, binaries: dict[str, Path], config_path: Path, out_dir: Path) -> list[str]:
     if name == "python":
         return [
@@ -285,7 +319,9 @@ def run_cell_client(
     except OSError as error:
         print(f"warning: failed to reset server stats before {client_name}: {error}", file=sys.stderr)
 
-    command = client_command(client_name, binaries, config_path, out_dir)
+    command = taskset_prefix(sweep.client_cpus) + client_command(
+        client_name, binaries, config_path, out_dir
+    )
     print("  +", " ".join(command))
     process = subprocess.Popen(command, cwd=ROOT)
     sampler = CpuSampler({"server": server_pid, "client": process.pid}).start()
@@ -368,7 +404,7 @@ def main() -> int:
     run_dir = ROOT / args.results_dir / timestamp
     (run_dir / "configs").mkdir(parents=True, exist_ok=True)
 
-    server = subprocess.Popen([str(binaries["server"]), "--bind", args.bind])
+    server = subprocess.Popen(server_command(sweep, binaries, args.bind))
     record: dict[str, Any] = {
         "config": sweep.as_dict(),
         "started_at": datetime.now(timezone.utc).isoformat(),

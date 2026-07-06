@@ -14,13 +14,30 @@ use tower::Service;
 struct Args {
     #[arg(long, default_value = "127.0.0.1:8080")]
     bind: SocketAddr,
+    /// Tokio worker threads for the server runtime. Defaults to all cores.
+    #[arg(long)]
+    worker_threads: Option<usize>,
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all();
+    if let Some(threads) = args.worker_threads {
+        builder.worker_threads(threads);
+    }
+    builder.build()?.block_on(serve(args))
+}
+
+async fn serve(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(args.bind).await?;
-    println!("synthetic OpenAI-style server listening on http://{}", args.bind);
+    let threads = args
+        .worker_threads
+        .map_or_else(|| "all cores".to_string(), |threads| threads.to_string());
+    println!(
+        "synthetic OpenAI-style server listening on http://{} (worker threads: {threads})",
+        args.bind
+    );
     let router = app();
 
     loop {

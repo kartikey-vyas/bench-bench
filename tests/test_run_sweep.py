@@ -12,7 +12,9 @@ from scripts.run_sweep import (
     format_duration,
     python_client_ready,
     rotated,
+    server_command,
     stop_reason,
+    taskset_prefix,
 )
 
 
@@ -156,6 +158,34 @@ class FormatDurationTests(unittest.TestCase):
         self.assertEqual(format_duration(45), "45s")
         self.assertEqual(format_duration(125), "2m05s")
         self.assertEqual(format_duration(3900), "1h05m")
+
+
+class CpuAllocationTests(unittest.TestCase):
+    def test_defaults_are_unset(self):
+        sweep = sweep_config()
+        self.assertIsNone(sweep.server_worker_threads)
+        self.assertIsNone(sweep.server_cpus)
+        self.assertIsNone(sweep.client_cpus)
+
+    def test_server_command_without_allocation(self):
+        sweep = sweep_config()
+        command = server_command(sweep, {"server": Path("/bin/server")}, "127.0.0.1:8080")
+        self.assertEqual(command, ["/bin/server", "--bind", "127.0.0.1:8080"])
+
+    def test_server_command_with_worker_threads_and_pinning(self):
+        sweep = sweep_config(server_worker_threads=8, server_cpus="0-7")
+        with patch("scripts.run_sweep.shutil.which", return_value="/usr/bin/taskset"):
+            command = server_command(sweep, {"server": Path("/bin/server")}, "127.0.0.1:8080")
+        self.assertEqual(
+            command,
+            ["taskset", "-c", "0-7", "/bin/server", "--bind", "127.0.0.1:8080",
+             "--worker-threads", "8"],
+        )
+
+    def test_taskset_prefix_degrades_without_taskset(self):
+        with patch("scripts.run_sweep.shutil.which", return_value=None):
+            self.assertEqual(taskset_prefix("0-7"), [])
+        self.assertEqual(taskset_prefix(None), [])
 
 
 class PythonClientReadyTests(unittest.TestCase):

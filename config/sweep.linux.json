@@ -9,9 +9,9 @@
   ],
   "concurrencies": [1, 4, 16, 64, 96, 128, 192, 256, 384, 512, 768, 1024],
   "clients": ["drain", "python", "go", "rust-reqwest", "rust-hyper"],
-  "duration_seconds": 10.0,
+  "duration_seconds": 15.0,
   "warmup_seconds": 2.0,
-  "repeats": 2,
+  "repeats": 3,
   "cooldown_seconds": 5.0,
   "chunks_per_response": 512,
   "chunk_bytes": 8,
@@ -19,7 +19,7 @@
   "stop_ttfc_excess_p95_ms": 100.0,
   "stop_failure_fraction": 0.001,
   "output_dir": "results",
-  "server_worker_threads": null,
-  "server_cpus": null,
-  "client_cpus": null
+  "server_worker_threads": 8,
+  "server_cpus": "0-7",
+  "client_cpus": "8-15"
 }

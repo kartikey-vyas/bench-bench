@@ -185,6 +185,34 @@ make sweep-smoke    # 2-minute end-to-end sanity sweep
 make sweep-report   # writes reports/sweep/index.html from the newest run
 ```
 
+`generate_sweep_report.py` also accepts several run directories and merges
+them into one report: `python scripts/generate_sweep_report.py results/<a> results/<b>`.
+
+### CPU allocation (dedicated-machine runs)
+
+Three optional sweep-config fields control CPU placement so the server and the
+client under test don't compete for cores:
+
+```json
+{
+  "server_worker_threads": 8,
+  "server_cpus": "0-7",
+  "client_cpus": "8-15"
+}
+```
+
+- `server_worker_threads`: caps the server's tokio runtime (passed to the
+  binary as `--worker-threads`). `null` = one worker per core.
+- `server_cpus` / `client_cpus`: `taskset -c` core lists applied to the server
+  and every client process. Linux only — on macOS (no `taskset`) the sweep
+  warns once and runs unpinned. Match these to your machine's topology and
+  keep the two sets disjoint.
+
+`config/sweep.linux.json` is a ready profile for a dedicated Linux box: the
+fine-grained ladder (1–1024 with dense rungs from 64 up), 3 repeats, 15s
+windows, and an 8-core server / 8-core client split — adjust the core lists
+to the actual core count before running.
+
 The Makefile auto-selects `.venv/bin/python` when present, falling back to
 `python3` otherwise; if you invoke `scripts/run_sweep.py` directly (bypassing
 `make`), use the project venv's Python as noted in Setup, or the sweep will
