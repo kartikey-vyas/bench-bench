@@ -53,6 +53,33 @@ Notes:
 - Cooldowns are 5s; at high rungs watch for TIME_WAIT/ephemeral-port pressure if failures appear at c≥768 (failures at high rungs only = environment, per interpretation rule 4).
 - Interesting numbers to extract: drain's curve on isolated server cores = the Rust server's true delivery ceiling; whether go vs rust separate at 384–1024 once dilution and contention are gone.
 
+## Per-core capacity + core-scaling series (optional second experiment)
+
+`config/sweep.percore.json` pins every client to ONE core (`client_cpus: "8"`),
+turning the knee into a clean per-core capacity number: `knee_concurrency ×
+rate ≈ faithful events/s per core`. Drain on the same single core is the
+parse-free ceiling, so drain-minus-client = the cost of SSE+JSON parsing on
+that runtime. On Linux, taskset affinity propagates correctly into GOMAXPROCS
+and tokio's worker count (both use sched_getaffinity), so no per-client flags
+are needed.
+
+To measure core scaling, clone the config per allocation and encode the core
+count in the tier NAMES (tier names are free labels; the report groups by
+them, so a merged report shows e.g. `eps500-1core` and `eps500-4core` as
+separate sections instead of averaging them together — never merge runs whose
+tier names don't encode the difference):
+
+- 1 core: `client_cpus: "8"`, tiers `*-1core`
+- 2 cores: `client_cpus: "8-9"`, tiers `*-2core`
+- 4 cores: `client_cpus: "8-11"`, tiers `*-4core`
+- 8 cores: `client_cpus: "8-15"`, tiers `*-8core`
+
+Then: `.venv/bin/python scripts/generate_sweep_report.py results/<run1core> results/<run4core> …`
+Expected shape: Go/Rust knees scale ~linearly with cores; Python stays flat
+(GIL) — that flatness is itself the finding, not an error. Keep the ladder
+denser and lower than the full profile (1-core knees land well under c=512
+at eps500; raise the ladder for the paced 100 eps tier or multi-core runs).
+
 ## Conventions
 
 - Commits go straight to `main`, imperative subject ("Add …", "Fix …").

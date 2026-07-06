@@ -1,0 +1,22 @@
+{
+  "base_url": "http://127.0.0.1:8080",
+  "tiers": [
+    {"name": "eps100-1core", "events_per_second": 100, "ttfc_ms": 200},
+    {"name": "eps500-1core", "events_per_second": 500, "ttfc_ms": 200}
+  ],
+  "concurrencies": [1, 4, 16, 32, 64, 96, 128, 192, 256, 384, 512],
+  "clients": ["drain", "python", "go", "rust-reqwest", "rust-hyper"],
+  "duration_seconds": 15.0,
+  "warmup_seconds": 2.0,
+  "repeats": 3,
+  "cooldown_seconds": 5.0,
+  "chunks_per_response": 512,
+  "chunk_bytes": 8,
+  "stop_efficiency_below": 0.9,
+  "stop_ttfc_excess_p95_ms": 100.0,
+  "stop_failure_fraction": 0.001,
+  "output_dir": "results",
+  "server_worker_threads": 8,
+  "server_cpus": "0-7",
+  "client_cpus": "8"
+}
