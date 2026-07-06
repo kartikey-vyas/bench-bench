@@ -1,6 +1,6 @@
 PYTHON := $(shell test -x .venv/bin/python && echo .venv/bin/python || echo python3)
 
-.PHONY: setup test test-python test-go test-rust smoke compare sweep sweep-smoke sweep-report
+.PHONY: setup test test-python test-go test-rust smoke compare sweep sweep-smoke sweep-report publish-report
 
 test: test-python test-go test-rust
 
@@ -33,6 +33,11 @@ sweep-smoke:
 
 sweep-report:
 	$(PYTHON) -m bench_harness.sweep_report $(RUNS)
+
+# Stage the current sweep report as the GitHub Pages front page (main:/docs).
+publish-report:
+	cp reports/sweep/index.html docs/index.html
+	@echo "staged docs/index.html — commit and push to deploy"
 
 setup:
 	bash scripts/setup.sh
